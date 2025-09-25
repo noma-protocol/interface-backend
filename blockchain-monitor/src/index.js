@@ -1,0 +1,117 @@
+import dotenv from 'dotenv';
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { BlockchainMonitor } from './blockchain-monitor.js';
+import { EventStorage } from './event-storage.js';
+import { WSServer } from './websocket-server.js';
+import { AuthManager } from './auth-manager.js';
+import { ReferralStore } from './referral-store.js';
+import { ReferralTracker } from './referral-tracker.js';
+import { HTTPServer } from './http-server.js';
+import cache from './cache.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+dotenv.config();
+
+async function loadPools() {
+  try {
+    const poolsPath = path.join(__dirname, '..', '..', 'data', 'pools.json');
+    const poolsData = await fs.readFile(poolsPath, 'utf-8');
+    const poolsConfig = JSON.parse(poolsData);
+    return poolsConfig.pools.map(pool => pool.address);
+  } catch (error) {
+    console.error('Failed to load pools from data/pools.json:', error.message);
+    return [];
+  }
+}
+
+async function main() {
+  try {
+    const rpcUrl = process.env.RPC_URL;
+    const websocketPort = parseInt(process.env.WEBSOCKET_PORT) || 8080;
+    const httpPort = parseInt(process.env.HTTP_PORT) || 3004;
+    const historyFilePath = process.env.HISTORY_FILE_PATH || './data/events-history.json';
+    
+    if (!rpcUrl) {
+      throw new Error('RPC_URL environment variable is required');
+    }
+
+    const poolAddresses = process.env.POOL_ADDRESSES 
+      ? process.env.POOL_ADDRESSES.split(',').map(addr => addr.trim())
+      : await loadPools();
+
+    console.log('Initializing services...');
+
+    const eventStorage = new EventStorage(historyFilePath);
+    await eventStorage.initialize();
+
+    const authManager = new AuthManager();
+
+    const blockchainMonitor = new BlockchainMonitor(rpcUrl, poolAddresses);
+    await blockchainMonitor.initialize();
+
+    // Initialize referral system
+    const referralStore = new ReferralStore();
+    await referralStore.initialize();
+
+    const referralTracker = new ReferralTracker(
+      blockchainMonitor.provider, 
+      referralStore,
+      `http://localhost:${httpPort}`
+    );
+    await referralTracker.initialize();
+
+    // Initialize HTTP server for referral API (pass the same referral store and rpcUrl)
+    const httpServer = new HTTPServer(httpPort, referralStore, rpcUrl);
+    await httpServer.initialize();
+    httpServer.start();
+
+    const wsServer = new WSServer(websocketPort, eventStorage, authManager);
+
+    blockchainMonitor.on('poolEvent', async (eventData) => {
+      console.log(`New ${eventData.eventName} event from pool ${eventData.poolAddress}`);
+      
+      const storedEvent = await eventStorage.addEvent(eventData);
+      
+      console.log(`Broadcasting ${eventData.eventName} event from pool ${eventData.poolAddress} with id ${storedEvent.id}`);
+      wsServer.broadcastEvent(storedEvent);
+      
+      // Track referral trades
+      if (eventData.eventName === 'Swap') {
+        await referralTracker.trackSwapEvent(eventData);
+      }
+    });
+
+    wsServer.start();
+    await blockchainMonitor.start();
+
+    console.log('Blockchain monitor started successfully');
+    console.log(`Monitoring ${poolAddresses.length} pools`);
+    console.log(`WebSocket server running on port ${websocketPort}`);
+    console.log(`HTTP referral API running on port ${httpPort}`);
+    
+    // Start cache statistics logging
+    cache.startStatsLogging(60000); // Log every minute
+    console.log('Cache statistics logging enabled (every 60 seconds)');
+
+    process.on('SIGINT', async () => {
+      console.log('\nShutting down...');
+      blockchainMonitor.stop();
+      wsServer.stop();
+      httpServer.stop();
+      process.exit(0);
+    });
+
+    setInterval(async () => {
+      await eventStorage.clearOldEvents(30);
+    }, 24 * 60 * 60 * 1000);
+
+  } catch (error) {
+    console.error('Failed to start blockchain monitor:', error);
+    process.exit(1);
+  }
+}
+
+main();

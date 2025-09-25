@@ -1,0 +1,21 @@
+{
+  "name": "blockchain-monitor",
+  "version": "1.0.0",
+  "description": "Blockchain event monitor with WebSocket server",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.5",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.1",
+    "ethers": "^6.9.0",
+    "express": "^4.18.2",
+    "node-cache": "^5.1.2",
+    "uuid": "^9.0.1",
+    "ws": "^8.16.0"
+  }
+}
