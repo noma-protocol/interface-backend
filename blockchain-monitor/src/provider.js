@@ -48,37 +48,15 @@ export function createProvider(url, network) {
     const maxReconnectAttempts = 10;
     const reconnectDelay = 5000; // 5 seconds
     
-    const setupReconnection = () => {
-      provider.websocket.on('close', (code, reason) => {
-        console.log(`WebSocket closed with code ${code}: ${reason}`);
-        
-        if (reconnectAttempts < maxReconnectAttempts) {
-          reconnectAttempts++;
-          console.log(`Attempting to reconnect (${reconnectAttempts}/${maxReconnectAttempts})...`);
-          
-          setTimeout(() => {
-            provider._start().then(() => {
-              console.log('Successfully reconnected to WebSocket');
-              reconnectAttempts = 0;
-              setupReconnection(); // Re-setup listeners after reconnection
-            }).catch((error) => {
-              console.error('Failed to reconnect:', error);
-            });
-          }, reconnectDelay);
-        } else {
-          console.error('Max reconnection attempts reached. Please restart the application.');
-        }
-      });
-      
-      provider.websocket.on('open', () => {
+    // WebSocketProvider automatically handles reconnection in ethers v6
+    // We just need to listen for debug events to track the status
+    provider.on('debug', (info) => {
+      if (info.action === 'webSocketOpen') {
         console.log('WebSocket connection established');
         reconnectAttempts = 0;
-      });
-    };
-    
-    // Wait for initial connection before setting up listeners
-    provider.ready.then(() => {
-      setupReconnection();
+      } else if (info.action === 'webSocketClose') {
+        console.log('WebSocket connection closed');
+      }
     });
     
     return provider;
