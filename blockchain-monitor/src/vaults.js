@@ -291,6 +291,12 @@ export class VaultService {
         );
       } catch (error) {
         console.error(`Error fetching pool address for vault ${vaultAddress}:`, error.message);
+        throw new Error(`Failed to fetch pool address: ${error.message}`);
+      }
+      
+      // If no pool was found, this vault is invalid
+      if (!poolAddress || poolAddress === ZeroAddress) {
+        throw new Error(`No liquidity pool found for vault ${vaultAddress}`);
       }
       
       // Convert the struct to a plain object with safe access
@@ -303,13 +309,9 @@ export class VaultService {
         deployer: data.deployer || ethers.ZeroAddress,
         vault: data.vault || vaultAddress,
         presaleContract: data.presaleContract || ethers.ZeroAddress,
-        stakingContract: data.stakingContract || ethers.ZeroAddress
+        stakingContract: data.stakingContract || ethers.ZeroAddress,
+        poolAddress: poolAddress
       };
-      
-      // Only include poolAddress if it's not zero
-      if (poolAddress && poolAddress !== ZeroAddress) {
-        result.poolAddress = poolAddress;
-      }
       
       return result;
     } catch (error) {
@@ -366,6 +368,7 @@ export class VaultService {
         // Associated contracts
         presaleContract: vaultDescription.presaleContract,
         stakingContract: vaultDescription.stakingContract,
+        poolAddress: vaultDescription.poolAddress,
         
         // Vault metrics from getVaultInfo
         liquidityRatio: vaultInfoData.liquidityRatio,
@@ -376,11 +379,6 @@ export class VaultService {
         newFloor: vaultInfoData.newFloor,
         totalInterest: vaultInfoData.totalInterest
       };
-      
-      // Only include poolAddress if it's not zero
-      if (vaultDescription.poolAddress && vaultDescription.poolAddress !== ZeroAddress) {
-        completeVaultInfo.poolAddress = vaultDescription.poolAddress;
-      }
       
       // Cache the complete vault info permanently since vault data doesn't change
       cache.setContractState(
