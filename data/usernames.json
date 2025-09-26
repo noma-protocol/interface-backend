@@ -1,0 +1,26 @@
+{
+  "0xcc91eb5d1ab2d577a64acd71f0aa9c5caf35d111": {
+    "username": "0xcC91...D111",
+    "lastChange": 1755981280022,
+    "cooldown": 86400000,
+    "changeCount": 1
+  },
+  "0x1234567890123456789012345678901234567890": {
+    "username": "TestUser1",
+    "lastChange": 1755981415136,
+    "cooldown": 86400000,
+    "changeCount": 1
+  },
+  "0xabcdef1234567890abcdef1234567890abcdef12": {
+    "username": "CooldownTest1",
+    "lastChange": 1755981453062,
+    "cooldown": 86400000,
+    "changeCount": 1
+  },
+  "0x98f2243e853afe7d8ac5ddbc32ba167e8b5f1bbd": {
+    "username": "IamScatMan",
+    "lastChange": 1756163304457,
+    "cooldown": 172800000,
+    "changeCount": 2
+  }
+}

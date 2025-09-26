@@ -34,8 +34,8 @@ const EXCHANGE_HELPER_ABI = [
 
 // Rate limiting configuration for QuickNode
 const RATE_LIMIT_CONFIG = {
-  requestsPerSecond: 10, // Reduced from 20 to avoid hitting limits
-  requestDelay: 100, // 100ms between requests (10 requests/second)
+  requestsPerSecond: 5, // Further reduced to be safe with QuickNode limits
+  requestDelay: 200, // 200ms between requests (5 requests/second)
   maxRetries: 3,
   retryDelay: 2000, // Increased initial retry delay
   backoffMultiplier: 2,
@@ -84,7 +84,7 @@ export class BlockchainMonitor extends EventEmitter {
     
     this.pollInterval = setInterval(async () => {
       await this.pollEvents();
-    }, 10000); // Poll every 10 seconds instead of 5
+    }, 20000); // Poll every 20 seconds to reduce API load
 
     console.log(`Monitoring ${this.poolAddresses.length} pools for events...`);
   }

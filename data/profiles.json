@@ -1,0 +1,27 @@
+{
+  "0x98f2243e853afe7d8ac5ddbc32ba167e8b5f1bbd": {
+    "firstConnected": "2025-08-24T17:11:45.116Z",
+    "lastConnected": "2025-09-10T04:16:29.426Z",
+    "reputation": 100
+  },
+  "0xcc91eb5d1ab2d577a64acd71f0aa9c5caf35d111": {
+    "firstConnected": "2025-08-25T00:56:42.106Z",
+    "lastConnected": "2025-09-05T00:00:34.657Z",
+    "reputation": 100
+  },
+  "0x8dc078a9638649515cbc02cdd3ddff6da3c9f851": {
+    "firstConnected": "2025-08-25T18:06:24.215Z",
+    "lastConnected": "2025-08-25T18:07:38.973Z",
+    "reputation": 100
+  },
+  "0x12e30fcc16b741a08ccf066074f0547f3ce79f32": {
+    "firstConnected": "2025-09-08T18:34:10.676Z",
+    "lastConnected": "2025-09-08T18:34:11.717Z",
+    "reputation": 100
+  },
+  "0x5368bdd0f9bc14c223a67b95874842dd77250d08": {
+    "firstConnected": "2025-09-09T02:25:59.001Z",
+    "lastConnected": "2025-09-09T02:26:00.145Z",
+    "reputation": 100
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "referred_users": {
+    "0x50440b6eedf99f0c920edbe98a329cfdd2592fd7": {
+      "referrer": "0x54302450bc0c3779bb2669f705afd5dee19d64b5",
+      "referralCode": "ada067a3cdc393e3",
+      "timestamp": 1757515038446
+    },
+    "0x98f2243e853afe7d8ac5ddbc32ba167e8b5f1bbd": {
+      "referrer": "0x50440b6eedf99f0c920edbe98a329cfdd2592fd7",
+      "referralCode": "a7568cb746d1a9d8",
+      "timestamp": 1757526313193
+    },
+    "0x5368bdd0f9bc14c223a67b95874842dd77250d08": {
+      "referrer": "0x98f2243e853afe7d8ac5ddbc32ba167e8b5f1bbd",
+      "referralCode": "4252fe7dbea04ba0",
+      "timestamp": 1757531893085
+    },
+    "0x281722fe53a483bfa0d7dd9bec8499eb45b5d048": {
+      "referrer": "0x98f2243e853afe7d8ac5ddbc32ba167e8b5f1bbd",
+      "referralCode": "4252fe7dbea04ba0",
+      "timestamp": 1757533884061
+    }
+  },
+  "referrers": {
+    "0x54302450bc0c3779bb2669f705afd5dee19d64b5": {
+      "code": "ada067a3cdc393e3",
+      "referred": [
+        "0x50440b6eedf99f0c920edbe98a329cfdd2592fd7"
+      ]
+    },
+    "0x50440b6eedf99f0c920edbe98a329cfdd2592fd7": {
+      "code": "a7568cb746d1a9d8",
+      "referred": [
+        "0x98f2243e853afe7d8ac5ddbc32ba167e8b5f1bbd"
+      ]
+    },
+    "0x98f2243e853afe7d8ac5ddbc32ba167e8b5f1bbd": {
+      "code": "4252fe7dbea04ba0",
+      "referred": [
+        "0x5368bdd0f9bc14c223a67b95874842dd77250d08",
+        "0x281722fe53a483bfa0d7dd9bec8499eb45b5d048"
+      ]
+    }
+  }
+}
