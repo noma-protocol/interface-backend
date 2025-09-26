@@ -78,10 +78,24 @@ async function main() {
       console.log(`Broadcasting ${eventData.eventName} event from pool ${eventData.poolAddress} with id ${storedEvent.id}`);
       wsServer.broadcastEvent(storedEvent);
       
-      // Track referral trades
+      // Track referral trades (legacy - for pools that don't use ExchangeHelper)
       if (eventData.eventName === 'Swap') {
         await referralTracker.trackSwapEvent(eventData);
       }
+    });
+    
+    // Handle ExchangeHelper events for referral tracking
+    blockchainMonitor.on('exchangeHelperEvent', async (eventData) => {
+      console.log(`New ExchangeHelper ${eventData.eventName} event - User: ${eventData.args.who}`);
+      
+      // Store the event
+      const storedEvent = await eventStorage.addEvent(eventData);
+      
+      // Broadcast to WebSocket clients
+      wsServer.broadcastEvent(storedEvent);
+      
+      // Track referral trades through ExchangeHelper
+      await referralTracker.trackExchangeHelperEvent(eventData);
     });
 
     wsServer.start();

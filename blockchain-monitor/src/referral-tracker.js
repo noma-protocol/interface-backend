@@ -2,7 +2,18 @@ import { ethers } from 'ethers';
 import axios from 'axios';
 import cache from './cache.js';
 
-// Token info for price calculations
+// ExchangeHelper contract address and ABI
+const EXCHANGE_HELPER_ADDRESS = process.env.EXCHANGE_HELPER_ADDRESS || '0xD82D7Bdd614bA07527351DE627C558Adbd0f7caE';
+
+// ExchangeHelper ABI for trade events
+const EXCHANGE_HELPER_ABI = [
+  'event BoughtTokensETH(address who, uint256 amount)',
+  'event BoughtTokensWETH(address who, uint256 amount)',
+  'event SoldTokensETH(address who, uint256 amount)',
+  'event SoldTokensWETH(address who, uint256 amount)'
+];
+
+// Token info for price calculations and referral tracking
 const TOKEN_INFO = {
   '0x46c7c9b2c22e95e9b304cfcec7cf912b16faaefc': {
     symbol: 'BUN',
@@ -29,15 +40,29 @@ export class ReferralTracker {
     // Cache MON price - in production this would come from an oracle
     this.monPriceUSD = 0.10; // Default MON price in USD
     this.lastPriceUpdate = 0;
+    
+    // Create ExchangeHelper contract instance
+    this.exchangeHelper = null;
   }
 
   async initialize() {
-    // In production, you would fetch MON price from a DEX or price oracle
-    // For now, we'll just use a fixed price
+    // Initialize ExchangeHelper contract
+    if (EXCHANGE_HELPER_ADDRESS && EXCHANGE_HELPER_ADDRESS !== ethers.ZeroAddress) {
+      this.exchangeHelper = new ethers.Contract(
+        EXCHANGE_HELPER_ADDRESS,
+        EXCHANGE_HELPER_ABI,
+        this.provider
+      );
+      console.log(`ReferralTracker initialized with ExchangeHelper at ${EXCHANGE_HELPER_ADDRESS}`);
+    } else {
+      console.warn('ReferralTracker: No ExchangeHelper address configured');
+    }
+    
     console.log(`ReferralTracker initialized with MON price: $${this.monPriceUSD}`);
   }
 
-  async trackSwapEvent(eventData) {
+  // Main method to track ExchangeHelper events
+  async trackExchangeHelperEvent(eventData) {
     try {
       // Skip if we've already processed this transaction
       if (this.processedTxHashes.has(eventData.transactionHash)) {
@@ -46,36 +71,40 @@ export class ReferralTracker {
       
       this.processedTxHashes.add(eventData.transactionHash);
       
-      // Only process Swap events
-      if (eventData.eventName !== 'Swap') {
+      // Only process ExchangeHelper trade events
+      const validEvents = ['BoughtTokensETH', 'BoughtTokensWETH', 'SoldTokensETH', 'SoldTokensWETH'];
+      if (!validEvents.includes(eventData.eventName)) {
         return;
       }
       
-      // Get transaction details to find the trader - check cache first
-      let tx = await cache.getTransaction(eventData.transactionHash);
+      // Extract trader address from event args
+      const traderAddress = eventData.args.who || eventData.args[0];
+      const amount = eventData.args.amount || eventData.args[1];
       
-      if (!tx) {
-        // Cache miss - fetch from provider
-        tx = await this.provider.getTransaction(eventData.transactionHash);
-        // Cache the transaction for future use
-        cache.setTransaction(eventData.transactionHash, tx);
+      // Determine which pool this trade was on by analyzing the transaction
+      const poolAddress = await this.determinePoolFromTransaction(eventData.transactionHash);
+      
+      if (!poolAddress) {
+        console.warn(`Could not determine pool for ExchangeHelper trade: ${eventData.transactionHash}`);
+        return;
       }
       
-      const userAddress = tx.from;
-      const poolAddress = eventData.poolAddress;
-      
       // Check if user is referred for this pool
-      const referralData = this.referralStore.checkReferral(userAddress, poolAddress);
+      const referralData = this.referralStore.checkReferral(traderAddress, poolAddress);
       
       if (!referralData.isReferred) {
         // User is not referred, skip tracking
         return;
       }
       
-      console.log(`Found referral trade: ${userAddress} on pool ${poolAddress}`);
+      console.log(`Found referral trade: ${traderAddress} on pool ${poolAddress} via ExchangeHelper`);
       
-      // Calculate trade volume
-      const tradeVolume = await this.calculateTradeVolume(eventData);
+      // Calculate trade volume based on the event type
+      const tradeVolume = await this.calculateTradeVolumeFromExchangeHelper(
+        eventData.eventName,
+        amount,
+        poolAddress
+      );
       
       if (!tradeVolume) {
         console.error('Could not calculate trade volume for', eventData.transactionHash);
@@ -84,7 +113,7 @@ export class ReferralTracker {
       
       // Track the trade
       const trade = await this.referralStore.trackTrade({
-        userAddress,
+        userAddress: traderAddress,
         referralCode: referralData.referralCode,
         referrer: referralData.referrer,
         poolAddress,
@@ -96,7 +125,7 @@ export class ReferralTracker {
         type: tradeVolume.type
       });
       
-      console.log(`Tracked referral trade: ${trade.id} - ${userAddress} traded ${tradeVolume.volumeMON} MON worth $${tradeVolume.volumeUSD}`);
+      console.log(`Tracked referral trade: ${trade.id} - ${traderAddress} traded ${tradeVolume.volumeMON} MON worth $${tradeVolume.volumeUSD}`);
       
       // Optionally notify via HTTP API
       if (this.httpApiUrl) {
@@ -108,51 +137,84 @@ export class ReferralTracker {
       }
       
     } catch (error) {
-      console.error('Error tracking swap event:', error);
+      console.error('Error tracking ExchangeHelper event:', error);
     }
   }
 
-  async calculateTradeVolume(eventData) {
+  // Legacy method for backward compatibility - redirects to ExchangeHelper tracking
+  async trackSwapEvent(eventData) {
+    // If it's an actual Swap event from a pool, we need to check if there's a corresponding
+    // ExchangeHelper event in the same transaction
+    console.log('Legacy trackSwapEvent called - checking for ExchangeHelper events in same tx');
+    
+    // For now, we'll just log a warning since pool swaps should be tracked via ExchangeHelper
+    console.warn(`Pool Swap event detected but should be using ExchangeHelper events: ${eventData.transactionHash}`);
+  }
+
+  async determinePoolFromTransaction(txHash) {
     try {
-      const args = eventData.args;
+      // Get transaction receipt to analyze the logs
+      let receipt = await cache.getTransaction(txHash + '_receipt');
       
-      // amount0 and amount1 are the token amounts swapped
-      const amount0 = BigInt(args.amount0);
-      const amount1 = BigInt(args.amount1);
+      if (!receipt) {
+        receipt = await this.provider.getTransactionReceipt(txHash);
+        cache.setTransaction(txHash + '_receipt', receipt);
+      }
       
-      // Determine which token is WMON and which is the other token
-      let tokenInfo, volumeMON, type;
+      // Look for Swap events in the logs to determine which pool was used
+      for (const log of receipt.logs) {
+        // Check if this is a Swap event (topic0 matches Swap event signature)
+        const swapEventSignature = ethers.id('Swap(address,address,int256,int256,uint160,uint128,int24)');
+        
+        if (log.topics[0] === swapEventSignature) {
+          // This is a Swap event, the address is the pool
+          const poolAddress = log.address;
+          
+          // Verify this pool is one we track
+          const tokenEntry = Object.entries(TOKEN_INFO).find(([, info]) => 
+            info.poolAddress.toLowerCase() === poolAddress.toLowerCase()
+          );
+          
+          if (tokenEntry) {
+            return poolAddress;
+          }
+        }
+      }
       
+      return null;
+    } catch (error) {
+      console.error('Error determining pool from transaction:', error);
+      return null;
+    }
+  }
+
+  async calculateTradeVolumeFromExchangeHelper(eventName, amount, poolAddress) {
+    try {
       // Find token info based on pool address
       const tokenEntry = Object.entries(TOKEN_INFO).find(([, info]) => 
-        info.poolAddress.toLowerCase() === eventData.poolAddress.toLowerCase()
+        info.poolAddress.toLowerCase() === poolAddress.toLowerCase()
       );
       
       if (!tokenEntry) {
-        console.warn(`Unknown pool: ${eventData.poolAddress}`);
+        console.warn(`Unknown pool in ExchangeHelper trade: ${poolAddress}`);
         return null;
       }
       
-      tokenInfo = tokenEntry[1];
-      const tokenAddress = tokenEntry[0];
+      const [tokenAddress, tokenInfo] = tokenEntry;
       
-      // In Uniswap V3, negative amounts indicate tokens going out, positive coming in
-      // amount0 is for token0, amount1 is for token1
-      // We need to determine which token is WMON (token1 in most pools)
-      
-      if (amount0 < 0n && amount1 > 0n) {
-        // Token0 out, Token1 (WMON) in - this is a SELL of Token0
-        volumeMON = this.formatEther(amount1 > 0n ? amount1 : -amount1);
-        type = 'sell';
-      } else if (amount0 > 0n && amount1 < 0n) {
-        // Token0 in, Token1 (WMON) out - this is a BUY of Token0
-        volumeMON = this.formatEther(amount1 > 0n ? amount1 : -amount1);
+      // Determine trade type based on event name
+      let type;
+      if (eventName.startsWith('Bought')) {
         type = 'buy';
+      } else if (eventName.startsWith('Sold')) {
+        type = 'sell';
       } else {
-        console.warn('Unexpected swap amounts:', { amount0: amount0.toString(), amount1: amount1.toString() });
+        console.warn(`Unknown ExchangeHelper event type: ${eventName}`);
         return null;
       }
       
+      // Amount is already in MON/WMON units
+      const volumeMON = this.formatEther(amount);
       const volumeUSD = volumeMON * this.monPriceUSD;
       
       return {
@@ -164,7 +226,7 @@ export class ReferralTracker {
       };
       
     } catch (error) {
-      console.error('Error calculating trade volume:', error);
+      console.error('Error calculating trade volume from ExchangeHelper:', error);
       return null;
     }
   }
@@ -183,5 +245,15 @@ export class ReferralTracker {
       const toKeep = txArray.slice(-5000);
       this.processedTxHashes = new Set(toKeep);
     }
+  }
+
+  // Get the ExchangeHelper contract address for external use
+  getExchangeHelperAddress() {
+    return EXCHANGE_HELPER_ADDRESS;
+  }
+
+  // Check if ExchangeHelper is configured
+  hasExchangeHelper() {
+    return this.exchangeHelper !== null;
   }
 }

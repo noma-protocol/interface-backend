@@ -156,7 +156,10 @@ export class EventStorage {
       amount0: args.amount0,
       amount1: args.amount1,
       sender: args.sender,
-      recipient: args.recipient
+      recipient: args.recipient,
+      // Include actual sender/recipient if available
+      actualSender: event.actualSender || args.sender,
+      actualRecipient: event.actualRecipient || args.recipient
     };
   }
 

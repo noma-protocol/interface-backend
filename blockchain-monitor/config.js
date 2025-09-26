@@ -1,4 +1,7 @@
-const feeTiers = [3000, 10000];
+// Standard fee tiers for Uniswap V3 and PancakeSwap V3
+// PancakeSwap V3 supports: 100 (0.01%), 500 (0.05%), 2500 (0.25%), 10000 (1%)
+// Uniswap V3 supports: 100 (0.01%), 500 (0.05%), 3000 (0.3%), 10000 (1%)
+const feeTiers = [100, 500, 2500, 3000, 10000];
 
 const protocolAddresses = {
     uniswapV3Factory: "0x961235a9020B05C44DF1026D956D1F4D78014276",
