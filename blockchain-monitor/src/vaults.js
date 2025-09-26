@@ -43,8 +43,8 @@ export class VaultService {
           let vaults = await cache.getContractState(NomaFactoryAddress, 'getVaults', [deployer]);
           
           if (!vaults) {
-            // Add delay before RPC call
-            await new Promise(resolve => setTimeout(resolve, 100));
+            // Add delay before RPC call to respect rate limits
+            await new Promise(resolve => setTimeout(resolve, 200));
             // Cache miss - fetch from contract
             vaults = await this.nomaFactoryContract.getVaults(deployer);
             // Cache for 5 minutes
@@ -63,8 +63,8 @@ export class VaultService {
       const vaultInfos = [];
       for (const vaultAddress of allVaultAddresses) {
         try {
-          // Add delay between vault info fetches
-          await new Promise(resolve => setTimeout(resolve, 200));
+          // Add delay between vault info fetches to respect rate limits
+          await new Promise(resolve => setTimeout(resolve, 500));
           const vaultInfo = await this.getVaultInfo(vaultAddress);
           if (vaultInfo) {
             vaultInfos.push(vaultInfo);
@@ -121,12 +121,21 @@ export class VaultService {
         data = description;
       }
       
-      // First check if we already have the pool address cached
+      // First check if we already have the pool address cached (try both token orders)
       let cachedPoolAddress = await cache.getContractState(
         'PoolDiscovery',
         'findPool',
         [data.token0, data.token1]
       );
+      
+      // If not found, try reversed order
+      if (!cachedPoolAddress || cachedPoolAddress === ZeroAddress) {
+        cachedPoolAddress = await cache.getContractState(
+          'PoolDiscovery',
+          'findPool',
+          [data.token1, data.token0]
+        );
+      }
       
       let poolAddress = ZeroAddress;
       
@@ -226,12 +235,21 @@ export class VaultService {
         }
         } // Close the if (poolAddress === ZeroAddress) block
         
-        // Cache the found pool address permanently
+        // Cache the found pool address permanently for both token orders
         if (poolAddress !== ZeroAddress) {
+          // Cache with original order
           cache.setContractState(
             'PoolDiscovery',
             'findPool',
             [data.token0, data.token1],
+            poolAddress,
+            0 // Permanent cache - pools are immutable
+          );
+          // Cache with reversed order too
+          cache.setContractState(
+            'PoolDiscovery',
+            'findPool',
+            [data.token1, data.token0],
             poolAddress,
             0 // Permanent cache - pools are immutable
           );
@@ -319,13 +337,13 @@ export class VaultService {
         totalInterest: vaultInfoData.totalInterest
       };
       
-      // Cache the complete vault info for 5 minutes
+      // Cache the complete vault info permanently since vault data doesn't change
       cache.setContractState(
         'VaultManager',
         'getCompleteVaultInfo',
         [vaultAddress],
         completeVaultInfo,
-        300 // 5 minutes
+        0 // Permanent cache
       );
       
       return completeVaultInfo;

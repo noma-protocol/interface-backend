@@ -51,7 +51,12 @@ class BlockchainCache {
     // Generic set method with stats
     set(cache, key, value, ttl) {
         this.stats.sets++;
-        return cache.set(key, value, ttl);
+        // If ttl is 0 or undefined, use permanent caching (no TTL)
+        if (ttl === 0 || ttl === undefined) {
+            return cache.set(key, value);
+        } else {
+            return cache.set(key, value, ttl);
+        }
     }
     
     // Transaction methods
