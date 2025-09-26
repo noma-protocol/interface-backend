@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import axios from 'axios';
 import cache from './cache.js';
+import { getMonPriceService } from './mon-price.js';
 
 // ExchangeHelper contract address and ABI
 const EXCHANGE_HELPER_ADDRESS = process.env.EXCHANGE_HELPER_ADDRESS || '0xD82D7Bdd614bA07527351DE627C558Adbd0f7caE';
@@ -37,8 +38,9 @@ export class ReferralTracker {
     this.httpApiUrl = httpApiUrl;
     this.processedTxHashes = new Set();
     
-    // Cache MON price - in production this would come from an oracle
-    this.monPriceUSD = 0.10; // Default MON price in USD
+    // Initialize MON price service
+    this.monPriceService = getMonPriceService(provider);
+    this.monPriceUSD = 0.10; // Default MON price in USD (fallback)
     this.lastPriceUpdate = 0;
     
     // Create ExchangeHelper contract instance
@@ -58,7 +60,14 @@ export class ReferralTracker {
       console.warn('ReferralTracker: No ExchangeHelper address configured');
     }
     
-    console.log(`ReferralTracker initialized with MON price: $${this.monPriceUSD}`);
+    // Fetch initial MON price
+    try {
+      this.monPriceUSD = await this.monPriceService.getMonPrice();
+    } catch (error) {
+      console.error('Failed to fetch MON price, using default:', error.message);
+    }
+    
+    console.log(`ReferralTracker initialized with MON price: $${this.monPriceUSD.toFixed(4)}`);
   }
 
   // Main method to track ExchangeHelper events
@@ -215,6 +224,15 @@ export class ReferralTracker {
       
       // Amount is already in MON/WMON units
       const volumeMON = this.formatEther(amount);
+      // Update MON price if needed (every 30 seconds)
+      if (Date.now() - this.lastPriceUpdate > 30000) {
+        try {
+          this.monPriceUSD = await this.monPriceService.getMonPrice();
+          this.lastPriceUpdate = Date.now();
+        } catch (error) {
+          console.error('Failed to update MON price:', error.message);
+        }
+      }
       const volumeUSD = volumeMON * this.monPriceUSD;
       
       return {
