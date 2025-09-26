@@ -172,15 +172,19 @@ export class VaultService {
       
       let poolAddress = ZeroAddress;
       
-      if (cachedPoolAddress && cachedPoolAddress !== ZeroAddress) {
-        console.log(`Using cached pool for ${data.tokenSymbol}: ${cachedPoolAddress}`);
+      if (cachedPoolAddress !== undefined) {
+        if (cachedPoolAddress === ZeroAddress) {
+          console.log(`Using cached result for ${data.tokenSymbol}: No pool found`);
+        } else {
+          console.log(`Using cached pool for ${data.tokenSymbol}: ${cachedPoolAddress}`);
+        }
         poolAddress = cachedPoolAddress;
       } else {
         console.log(`Searching for pool for ${data.tokenSymbol} - token0: ${data.token0}, token1: ${data.token1}`);
       }
       
       try {
-        if (poolAddress === ZeroAddress) {
+        if (cachedPoolAddress === undefined && poolAddress === ZeroAddress) {
         // First try Uniswap V3 with all fee tiers
         const uniswapFactory = new ethers.Contract(
           protocolAddresses.uniswapV3Factory,
@@ -268,25 +272,23 @@ export class VaultService {
         }
         } // Close the if (poolAddress === ZeroAddress) block
         
-        // Cache the found pool address permanently for both token orders
-        if (poolAddress !== ZeroAddress) {
-          // Cache with original order
-          cache.setContractState(
-            'PoolDiscovery',
-            'findPool',
-            [data.token0, data.token1],
-            poolAddress,
-            0 // Permanent cache - pools are immutable
-          );
-          // Cache with reversed order too
-          cache.setContractState(
-            'PoolDiscovery',
-            'findPool',
-            [data.token1, data.token0],
-            poolAddress,
-            0 // Permanent cache - pools are immutable
-          );
-        }
+        // Always cache the pool address (even if not found) to prevent repeated searches
+        // Cache with original order
+        cache.setContractState(
+          'PoolDiscovery',
+          'findPool',
+          [data.token0, data.token1],
+          poolAddress,
+          0 // Permanent cache - pools are immutable
+        );
+        // Cache with reversed order too
+        cache.setContractState(
+          'PoolDiscovery',
+          'findPool',
+          [data.token1, data.token0],
+          poolAddress,
+          0 // Permanent cache - pools are immutable
+        );
       } catch (error) {
         console.error(`Error fetching pool address for vault ${vaultAddress}:`, error.message);
       }
