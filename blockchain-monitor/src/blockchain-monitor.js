@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import EventEmitter from 'events';
 import cache from './cache.js';
+import { createProvider, checkProviderConnection } from './provider.js';
 
 // Standard Uniswap V3 events
 const UNISWAP_V3_ABI = [
@@ -45,7 +46,7 @@ const RATE_LIMIT_CONFIG = {
 export class BlockchainMonitor extends EventEmitter {
   constructor(rpcUrl, poolAddresses) {
     super();
-    this.provider = new ethers.JsonRpcProvider(rpcUrl);
+    this.provider = createProvider(rpcUrl);
     this.poolAddresses = poolAddresses;
     this.contracts = new Map();
     this.isRunning = false;
@@ -76,7 +77,20 @@ export class BlockchainMonitor extends EventEmitter {
 
   async start() {
     if (this.isRunning) return;
+    
+    // Check provider connection first
+    const isConnected = await checkProviderConnection(this.provider);
+    if (!isConnected) {
+      throw new Error('Failed to connect to blockchain provider');
+    }
+    
     this.isRunning = true;
+
+    // For WebSocket providers, set up event listeners for real-time updates
+    if (this.provider.websocket) {
+      console.log('Setting up WebSocket event listeners...');
+      await this.setupWebSocketListeners();
+    }
 
     // Start polling for events
     this.lastBlock = await this.provider.getBlockNumber();
@@ -403,6 +417,34 @@ export class BlockchainMonitor extends EventEmitter {
     }
   }
 
+  async setupWebSocketListeners() {
+    // Set up real-time event listeners for each pool
+    for (const [poolAddress, contract] of this.contracts) {
+      try {
+        // Listen to all events from this pool
+        contract.on('*', async (event) => {
+          console.log(`Real-time event from pool ${poolAddress}:`, event.eventName);
+          await this.processLog(poolAddress, contract, event.log);
+        });
+      } catch (error) {
+        console.error(`Error setting up listeners for pool ${poolAddress}:`, error);
+      }
+    }
+    
+    // Set up listener for ExchangeHelper events
+    if (this.exchangeHelper) {
+      this.exchangeHelper.on('*', async (event) => {
+        console.log(`Real-time ExchangeHelper event:`, event.eventName);
+        await this.processExchangeHelperLog(event.log);
+      });
+    }
+    
+    // Listen for new blocks (useful for updating lastBlock)
+    this.provider.on('block', (blockNumber) => {
+      this.lastBlock = blockNumber;
+    });
+  }
+
   stop() {
     if (!this.isRunning) return;
     this.isRunning = false;
@@ -410,6 +452,17 @@ export class BlockchainMonitor extends EventEmitter {
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
+    }
+    
+    // Remove WebSocket listeners if using WebSocket provider
+    if (this.provider.websocket) {
+      this.provider.removeAllListeners();
+      for (const contract of this.contracts.values()) {
+        contract.removeAllListeners();
+      }
+      if (this.exchangeHelper) {
+        this.exchangeHelper.removeAllListeners();
+      }
     }
 
     console.log('Stopped monitoring pools');

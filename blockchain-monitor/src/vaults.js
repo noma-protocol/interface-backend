@@ -4,6 +4,7 @@ import IUniswapV3Factory from "../../assets/IUniswapV3Factory.json" assert { typ
 import deployment from "../../assets/deployment.json" assert { type: "json" };
 import { ethers } from "ethers";
 import cache from './cache.js';
+import { createProvider } from './provider.js';
 import config from "../config.js";
 const { feeTiers, protocolAddresses } = config;
 
@@ -13,7 +14,7 @@ const NomaFactoryAddress = deployment[CHAIN_ID].Factory;
 
 export class VaultService {
   constructor(rpcUrl) {
-    this.provider = new ethers.JsonRpcProvider(rpcUrl);
+    this.provider = createProvider(rpcUrl);
     this.nomaFactoryContract = new ethers.Contract(
       NomaFactoryAddress,
       INomaFactory.abi,
