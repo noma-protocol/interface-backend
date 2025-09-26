@@ -1,7 +1,5 @@
 import { ethers } from 'ethers';
-import { getCache } from './cache.js';
-
-const cache = getCache();
+import cache from './cache.js';
 
 // Uniswap V3 Pool ABI (only what we need)
 const poolABI = [
