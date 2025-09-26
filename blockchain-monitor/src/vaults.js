@@ -294,7 +294,7 @@ export class VaultService {
       }
       
       // Convert the struct to a plain object with safe access
-      return {
+      const result = {
         tokenName: data.tokenName || 'Unknown',
         tokenSymbol: data.tokenSymbol || 'UNKNOWN',
         tokenDecimals: data.tokenDecimals || 18,
@@ -303,9 +303,15 @@ export class VaultService {
         deployer: data.deployer || ethers.ZeroAddress,
         vault: data.vault || vaultAddress,
         presaleContract: data.presaleContract || ethers.ZeroAddress,
-        stakingContract: data.stakingContract || ethers.ZeroAddress,
-        poolAddress: poolAddress
+        stakingContract: data.stakingContract || ethers.ZeroAddress
       };
+      
+      // Only include poolAddress if it's not zero
+      if (poolAddress && poolAddress !== ZeroAddress) {
+        result.poolAddress = poolAddress;
+      }
+      
+      return result;
     } catch (error) {
       // Handle specific error types
       if (error.code === 'CALL_EXCEPTION') {
@@ -360,7 +366,6 @@ export class VaultService {
         // Associated contracts
         presaleContract: vaultDescription.presaleContract,
         stakingContract: vaultDescription.stakingContract,
-        poolAddress: vaultDescription.poolAddress,
         
         // Vault metrics from getVaultInfo
         liquidityRatio: vaultInfoData.liquidityRatio,
@@ -371,6 +376,11 @@ export class VaultService {
         newFloor: vaultInfoData.newFloor,
         totalInterest: vaultInfoData.totalInterest
       };
+      
+      // Only include poolAddress if it's not zero
+      if (vaultDescription.poolAddress && vaultDescription.poolAddress !== ZeroAddress) {
+        completeVaultInfo.poolAddress = vaultDescription.poolAddress;
+      }
       
       // Cache the complete vault info permanently since vault data doesn't change
       cache.setContractState(
