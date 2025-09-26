@@ -314,20 +314,26 @@ export class WSServer extends EventEmitter {
     for (const [clientId, client] of this.clients) {
       if (!client.authenticated) continue;
       
-      const normalizedEventPool = event.poolAddress.toLowerCase();
-      
-      // If client has no specific subscriptions, they get ALL events
-      // Otherwise, check if they're subscribed to this specific pool
-      const isSubscribedToAll = client.pools.length === 0;
-      const isSubscribedToThisPool = client.pools.includes(normalizedEventPool);
-      
-      if (isSubscribedToAll || isSubscribedToThisPool) {
-        if (client.ws.readyState === 1) {
-          client.ws.send(JSON.stringify({
-            type: 'event',
-            data: event
-          }, bigIntReplacer));
+      // For ExchangeHelper events, there's no poolAddress
+      // For Uniswap events, check pool subscriptions
+      if (event.poolAddress) {
+        const normalizedEventPool = event.poolAddress.toLowerCase();
+        
+        // If client has no specific subscriptions, they get ALL events
+        // Otherwise, check if they're subscribed to this specific pool
+        const isSubscribedToAll = client.pools.length === 0;
+        const isSubscribedToThisPool = client.pools.includes(normalizedEventPool);
+        
+        if (!isSubscribedToAll && !isSubscribedToThisPool) {
+          continue;
         }
+      }
+      
+      if (client.ws.readyState === 1) {
+        client.ws.send(JSON.stringify({
+          type: 'event',
+          data: event
+        }, bigIntReplacer));
       }
     }
   }
