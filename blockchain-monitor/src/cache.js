@@ -14,7 +14,7 @@ class BlockchainCache {
         });
         
         this.contractStateCache = new NodeCache({ 
-            stdTTL: 3600,      // 1 hour default for contract state
+            stdTTL: 0,         // No default TTL - must be specified per key
             checkperiod: 300   // Check every 5 minutes
         });
         
@@ -51,9 +51,10 @@ class BlockchainCache {
     // Generic set method with stats
     set(cache, key, value, ttl) {
         this.stats.sets++;
-        // If ttl is 0 or undefined, use permanent caching (no TTL)
-        if (ttl === 0 || ttl === undefined) {
-            return cache.set(key, value);
+        // If ttl is 0, undefined, or negative, don't expire
+        // NodeCache interprets 0 as "use default", so we use a very large number
+        if (ttl === 0 || ttl === undefined || ttl < 0) {
+            return cache.set(key, value, 10000000); // ~115 days
         } else {
             return cache.set(key, value, ttl);
         }

@@ -19,10 +19,40 @@ export class VaultService {
       INomaFactory.abi,
       this.provider
     );
+    
+    // Track in-flight requests to prevent duplicate work
+    this.inFlightRequests = new Map();
   }
 
   async getAllVaults() {
+    const requestKey = 'getAllVaults';
+    
+    // Check if request is already in-flight
+    if (this.inFlightRequests.has(requestKey)) {
+      return this.inFlightRequests.get(requestKey);
+    }
+    
+    // Create new request promise
+    const requestPromise = this._getAllVaultsImpl();
+    this.inFlightRequests.set(requestKey, requestPromise);
+    
     try {
+      const result = await requestPromise;
+      return result;
+    } finally {
+      this.inFlightRequests.delete(requestKey);
+    }
+  }
+  
+  async _getAllVaultsImpl() {
+    try {
+      // Check if we have the complete vault list cached
+      const cachedVaults = await cache.getContractState('VaultService', 'allVaults', []);
+      if (cachedVaults) {
+        console.log(`Using cached vault list (${cachedVaults.length} vaults)`);
+        return cachedVaults;
+      }
+      
       // Check cache for deployers first
       let deployers = await cache.getContractState(NomaFactoryAddress, 'getDeployers');
       
@@ -74,6 +104,9 @@ export class VaultService {
         }
       }
 
+      // Cache the complete vault list for 5 minutes
+      cache.setContractState('VaultService', 'allVaults', [], vaultInfos, 300);
+      
       return vaultInfos;
     } catch (error) {
       console.error('Error in getAllVaults:', error);
