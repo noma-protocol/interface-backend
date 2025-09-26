@@ -74,7 +74,7 @@ export class VaultService {
           
           if (!vaults) {
             // Add delay before RPC call to respect rate limits
-            await new Promise(resolve => setTimeout(resolve, 200));
+            await new Promise(resolve => setTimeout(resolve, 400));
             // Cache miss - fetch from contract
             vaults = await this.nomaFactoryContract.getVaults(deployer);
             // Cache for 5 minutes
@@ -94,7 +94,7 @@ export class VaultService {
       for (const vaultAddress of allVaultAddresses) {
         try {
           // Add delay between vault info fetches to respect rate limits
-          await new Promise(resolve => setTimeout(resolve, 500));
+          await new Promise(resolve => setTimeout(resolve, 1000));
           const vaultInfo = await this.getVaultInfo(vaultAddress);
           if (vaultInfo) {
             vaultInfos.push(vaultInfo);
