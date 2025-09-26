@@ -14,8 +14,8 @@ class BlockchainCache {
         });
         
         this.contractStateCache = new NodeCache({ 
-            stdTTL: 60,        // 1 minute for contract state (can change)
-            checkperiod: 30
+            stdTTL: 3600,      // 1 hour default for contract state
+            checkperiod: 300   // Check every 5 minutes
         });
         
         this.logCache = new NodeCache({ 

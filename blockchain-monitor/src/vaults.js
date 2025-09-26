@@ -43,6 +43,8 @@ export class VaultService {
           let vaults = await cache.getContractState(NomaFactoryAddress, 'getVaults', [deployer]);
           
           if (!vaults) {
+            // Add delay before RPC call
+            await new Promise(resolve => setTimeout(resolve, 100));
             // Cache miss - fetch from contract
             vaults = await this.nomaFactoryContract.getVaults(deployer);
             // Cache for 5 minutes
@@ -61,6 +63,8 @@ export class VaultService {
       const vaultInfos = [];
       for (const vaultAddress of allVaultAddresses) {
         try {
+          // Add delay between vault info fetches
+          await new Promise(resolve => setTimeout(resolve, 200));
           const vaultInfo = await this.getVaultInfo(vaultAddress);
           if (vaultInfo) {
             vaultInfos.push(vaultInfo);
@@ -83,6 +87,8 @@ export class VaultService {
       let description = await cache.getContractState(NomaFactoryAddress, 'getVaultDescription', [vaultAddress]);
       
       if (!description) {
+        // Add delay before RPC call
+        await new Promise(resolve => setTimeout(resolve, 100));
         // Cache miss - fetch from contract
         description = await this.nomaFactoryContract.getVaultDescription(vaultAddress);
         // Cache for 5 minutes  
@@ -115,10 +121,24 @@ export class VaultService {
         data = description;
       }
       
-      // Fetch pool address from Uniswap V3 Factory checking if pool address is address zero then try with PancakeSwap
+      // First check if we already have the pool address cached
+      let cachedPoolAddress = await cache.getContractState(
+        'PoolDiscovery',
+        'findPool',
+        [data.token0, data.token1]
+      );
+      
       let poolAddress = ZeroAddress;
       
+      if (cachedPoolAddress && cachedPoolAddress !== ZeroAddress) {
+        console.log(`Using cached pool for ${data.tokenSymbol}: ${cachedPoolAddress}`);
+        poolAddress = cachedPoolAddress;
+      } else {
+        console.log(`Searching for pool for ${data.tokenSymbol} - token0: ${data.token0}, token1: ${data.token1}`);
+      }
+      
       try {
+        if (poolAddress === ZeroAddress) {
         // First try Uniswap V3 with all fee tiers
         const uniswapFactory = new ethers.Contract(
           protocolAddresses.uniswapV3Factory,
@@ -128,27 +148,36 @@ export class VaultService {
         
         // Try each fee tier from config
         for (const feeTier of feeTiers) {
-          // Check cache first
-          let pool = await cache.getContractState(
-            protocolAddresses.uniswapV3Factory, 
-            'getPool', 
-            [data.token0, data.token1, feeTier]
-          );
-          
-          if (!pool) {
-            pool = await uniswapFactory.getPool(data.token0, data.token1, feeTier);
-            cache.setContractState(
-              protocolAddresses.uniswapV3Factory,
-              'getPool',
-              [data.token0, data.token1, feeTier],
-              pool,
-              300
+          // Try both token orders (token0/token1 and token1/token0)
+          for (const [tokenA, tokenB] of [[data.token0, data.token1], [data.token1, data.token0]]) {
+            // Check cache first
+            let pool = await cache.getContractState(
+              protocolAddresses.uniswapV3Factory, 
+              'getPool', 
+              [tokenA, tokenB, feeTier]
             );
+            
+            if (!pool) {
+              // Add delay before RPC call to respect rate limits
+              await new Promise(resolve => setTimeout(resolve, 100));
+              pool = await uniswapFactory.getPool(tokenA, tokenB, feeTier);
+              cache.setContractState(
+                protocolAddresses.uniswapV3Factory,
+                'getPool',
+                [tokenA, tokenB, feeTier],
+                pool,
+                0 // Permanent - pool addresses never change
+              );
+            }
+            
+            if (pool && pool !== ZeroAddress) {
+              poolAddress = pool;
+              break; // Found a pool, stop searching
+            }
           }
           
-          if (pool && pool !== ZeroAddress) {
-            poolAddress = pool;
-            break; // Found a pool, stop searching
+          if (poolAddress !== ZeroAddress) {
+            break; // Found a pool, stop searching fee tiers
           }
         }
         
@@ -162,28 +191,50 @@ export class VaultService {
           
           // Try each fee tier for PancakeSwap
           for (const feeTier of feeTiers) {
-            let pool = await cache.getContractState(
-              protocolAddresses.pancakeV3Factory,
-              'getPool',
-              [data.token0, data.token1, feeTier]
-            );
-            
-            if (!pool) {
-              pool = await pancakeFactory.getPool(data.token0, data.token1, feeTier);
-              cache.setContractState(
+            // Try both token orders (token0/token1 and token1/token0)
+            for (const [tokenA, tokenB] of [[data.token0, data.token1], [data.token1, data.token0]]) {
+              let pool = await cache.getContractState(
                 protocolAddresses.pancakeV3Factory,
                 'getPool',
-                [data.token0, data.token1, feeTier],
-                pool,
-                300
+                [tokenA, tokenB, feeTier]
               );
+              
+              if (!pool) {
+                // Add delay before RPC call to respect rate limits
+                await new Promise(resolve => setTimeout(resolve, 100));
+                pool = await pancakeFactory.getPool(tokenA, tokenB, feeTier);
+                cache.setContractState(
+                  protocolAddresses.pancakeV3Factory,
+                  'getPool',
+                  [tokenA, tokenB, feeTier],
+                  pool,
+                  0 // Permanent - pool addresses never change
+                );
+              }
+              
+              if (pool && pool !== ZeroAddress) {
+                poolAddress = pool;
+                console.log(`Found PancakeSwap pool for ${data.tokenSymbol} at ${pool} with fee tier ${feeTier}`);
+                break; // Found a pool, stop searching
+              }
             }
             
-            if (pool && pool !== ZeroAddress) {
-              poolAddress = pool;
-              break; // Found a pool, stop searching
+            if (poolAddress !== ZeroAddress) {
+              break; // Found a pool, stop searching fee tiers
             }
           }
+        }
+        } // Close the if (poolAddress === ZeroAddress) block
+        
+        // Cache the found pool address permanently
+        if (poolAddress !== ZeroAddress) {
+          cache.setContractState(
+            'PoolDiscovery',
+            'findPool',
+            [data.token0, data.token1],
+            poolAddress,
+            0 // Permanent cache - pools are immutable
+          );
         }
       } catch (error) {
         console.error(`Error fetching pool address for vault ${vaultAddress}:`, error.message);
@@ -215,6 +266,17 @@ export class VaultService {
 
   async getVaultInfo(vaultAddress) {
     try {
+      // Check if we have the complete vault info cached
+      const cachedVaultInfo = await cache.getContractState(
+        'VaultManager',
+        'getCompleteVaultInfo',
+        [vaultAddress]
+      );
+      
+      if (cachedVaultInfo) {
+        return cachedVaultInfo;
+      }
+      
       // Fetch both vault info and description in parallel
       const [vaultInfoData, vaultDescription] = await Promise.all([
         this.getVaultInfoOnly(vaultAddress),
@@ -228,7 +290,7 @@ export class VaultService {
       }
 
       // Blend both objects into a comprehensive vault information object
-      return {
+      const completeVaultInfo = {
         // Vault identification
         address: vaultAddress,
         deployer: vaultDescription.deployer,
@@ -256,6 +318,17 @@ export class VaultService {
         newFloor: vaultInfoData.newFloor,
         totalInterest: vaultInfoData.totalInterest
       };
+      
+      // Cache the complete vault info for 5 minutes
+      cache.setContractState(
+        'VaultManager',
+        'getCompleteVaultInfo',
+        [vaultAddress],
+        completeVaultInfo,
+        300 // 5 minutes
+      );
+      
+      return completeVaultInfo;
     } catch (error) {
       console.error(`Error fetching comprehensive vault info for ${vaultAddress}:`, error);
       return null;

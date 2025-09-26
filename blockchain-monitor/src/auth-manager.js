@@ -54,6 +54,24 @@ export class AuthManager {
         }
       }
       
+      // Check if it's the trollbox format
+      if (message.includes('Sign this message to authenticate with the Noma Trollbox')) {
+        // Extract timestamp from trollbox format
+        const timestampMatch = message.match(/Timestamp: (\d+)/);
+        if (timestampMatch) {
+          const timestamp = parseInt(timestampMatch[1]);
+          const maxAge = 5 * 60 * 1000; // 5 minutes
+          
+          if (Date.now() - timestamp > maxAge) {
+            console.log('Authentication failed: Message expired');
+            return false;
+          }
+          
+          console.log('Authentication successful (trollbox format)');
+          return true;
+        }
+      }
+      
       // Original format with structured message
       const messageLines = message.split('\n');
       const addressLine = messageLines.find(line => line.startsWith('Address: '));

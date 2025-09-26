@@ -1,7 +1,12 @@
 import express from 'express';
 import cors from 'cors';
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { ReferralStore } from './referral-store.js';
 import { VaultService } from './vaults.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export class HTTPServer {
   constructor(port = 3004, referralStore = null, rpcUrl = null) {
@@ -9,6 +14,7 @@ export class HTTPServer {
     this.app = express();
     this.referralStore = referralStore || new ReferralStore();
     this.vaultService = rpcUrl ? new VaultService(rpcUrl) : null;
+    this.tokens = [];
     
     // Middleware
     this.app.use(cors());
@@ -23,6 +29,18 @@ export class HTTPServer {
     if (!this.referralStore.isInitialized) {
       await this.referralStore.initialize();
       console.log('HTTP server referral store initialized');
+    }
+    
+    // Load tokens from data/tokens.json
+    try {
+      const tokensPath = path.join(__dirname, '..', '..', 'data', 'tokens.json');
+      const tokensData = await fs.readFile(tokensPath, 'utf-8');
+      const parsed = JSON.parse(tokensData);
+      this.tokens = parsed.tokens || [];
+      console.log(`Loaded ${this.tokens.length} tokens from tokens.json`);
+    } catch (error) {
+      console.error('Error loading tokens.json:', error);
+      this.tokens = [];
     }
   }
 
@@ -251,12 +269,31 @@ export class HTTPServer {
         });
       }
     });
+
+    // Get tokens
+    this.app.get('/api/tokens', (req, res) => {
+      try {
+        // Filter only deployed tokens by default unless explicitly requested
+        const includeAll = req.query.includeAll === 'true';
+        
+        const tokens = includeAll ? this.tokens : this.tokens.filter(token => 
+          token.status === 'deployed' || token.status === 'success'
+        );
+        
+        res.json({ tokens });
+      } catch (error) {
+        console.error('Error fetching tokens:', error);
+        res.status(500).json({ error: 'Failed to retrieve tokens' });
+      }
+    });
   }
 
   start() {
     this.server = this.app.listen(this.port, () => {
       console.log(`HTTP server listening on port ${this.port}`);
       console.log(`Referral API available at http://localhost:${this.port}/api/referrals`);
+      console.log(`Tokens API available at http://localhost:${this.port}/api/tokens`);
+      console.log(`Vault API available at http://localhost:${this.port}/vault`);
     });
   }
 
