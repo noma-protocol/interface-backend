@@ -67,14 +67,18 @@ export class WSServer extends EventEmitter {
       // Update connection count
       this.connectionsByIp.set(clientIp, currentConnections + 1);
       
-      console.log(`New WebSocket connection:`, {
-        clientId,
-        clientIp,
-        origin,
-        userAgent: userAgent?.substring(0, 50) + '...',
-        totalClients: this.clients.size + 1,
-        ipConnections: currentConnections + 1
-      });
+      if (global.DEBUG) {
+        console.log(`New WebSocket connection:`, {
+          clientId,
+          clientIp,
+          origin,
+          userAgent: userAgent?.substring(0, 50) + '...',
+          totalClients: this.clients.size + 1,
+          ipConnections: currentConnections + 1
+        });
+      } else {
+        console.log(`New WebSocket connection from ${clientIp} (${this.clients.size + 1} total)`);
+      }
       const client = {
         id: clientId,
         ws,
@@ -113,25 +117,29 @@ export class WSServer extends EventEmitter {
           this.connectionsByIp.delete(clientIp);
         }
         
-        console.log(`Client disconnected:`, {
-          clientId,
-          totalClients: this.clients.size,
-          authenticated: client.authenticated,
-          ipConnections: Math.max(0, currentConnections - 1)
-        });
+        if (global.DEBUG) {
+          console.log(`Client disconnected:`, {
+            clientId,
+            totalClients: this.clients.size,
+            authenticated: client.authenticated,
+            ipConnections: Math.max(0, currentConnections - 1)
+          });
+        } else {
+          console.log(`Client disconnected (${this.clients.size} remaining)`);
+        }
       });
 
       ws.on('error', (error) => {
         console.error(`WebSocket error for client ${clientId}:`, error);
       });
 
-      // Send connection confirmation and prompt for authentication
+      // Send connection confirmation
       ws.send(JSON.stringify({
         type: 'connection',
         clientId,
         message: 'Connected to blockchain event stream',
-        requiresAuth: true,
-        authMessage: 'Please authenticate to receive blockchain events'
+        requiresAuth: false,
+        authMessage: 'Authentication optional for public blockchain data'
       }));
     });
 
@@ -239,12 +247,9 @@ export class WSServer extends EventEmitter {
   }
 
   async handleSubscribe(client, data) {
-    if (!client.authenticated) {
-      client.ws.send(JSON.stringify({
-        type: 'error',
-        message: 'Not authenticated'
-      }));
-      return;
+    // Allow subscribing without authentication for public blockchain events
+    if (global.DEBUG && !client.authenticated) {
+      console.log('Client subscribing without authentication');
     }
 
     const { pools = [] } = data;
@@ -282,12 +287,9 @@ export class WSServer extends EventEmitter {
   }
 
   async handleGetHistory(client, data) {
-    if (!client.authenticated) {
-      client.ws.send(JSON.stringify({
-        type: 'error',
-        message: 'Not authenticated'
-      }));
-      return;
+    // Allow getting history without authentication for public blockchain events
+    if (global.DEBUG && !client.authenticated) {
+      console.log('Client getting history without authentication');
     }
 
     const { pools, startTime, endTime, limit = 1000 } = data;
@@ -322,12 +324,9 @@ export class WSServer extends EventEmitter {
   }
 
   async handleGetLatest(client, data) {
-    if (!client.authenticated) {
-      client.ws.send(JSON.stringify({
-        type: 'error',
-        message: 'Not authenticated'
-      }));
-      return;
+    // Allow getting latest events without authentication
+    if (global.DEBUG && !client.authenticated) {
+      console.log('Client getting latest events without authentication');
     }
 
     const { limit = 100 } = data;
@@ -349,7 +348,7 @@ export class WSServer extends EventEmitter {
 
   broadcastEvent(event) {
     for (const [clientId, client] of this.clients) {
-      if (!client.authenticated) continue;
+      // Broadcast to all connected clients, not just authenticated ones
       
       // For ExchangeHelper events, there's no poolAddress
       // For Uniswap events, check pool subscriptions
@@ -376,12 +375,9 @@ export class WSServer extends EventEmitter {
   }
 
   async handleGetGlobalTrades(client, data) {
-    if (!client.authenticated) {
-      client.ws.send(JSON.stringify({
-        type: 'error',
-        message: 'Not authenticated'
-      }));
-      return;
+    // Allow getting global trades without authentication
+    if (global.DEBUG && !client.authenticated) {
+      console.log('Client getting global trades without authentication');
     }
 
     // Get limit from request or default to 50

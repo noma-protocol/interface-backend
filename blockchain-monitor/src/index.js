@@ -13,6 +13,13 @@ import cache from './cache.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Parse command line arguments
+const args = process.argv.slice(2);
+const DEBUG = args.includes('--debug');
+
+// Set up global debug flag
+global.DEBUG = DEBUG;
+
 dotenv.config();
 
 async function loadPools() {
@@ -29,6 +36,11 @@ async function loadPools() {
 
 async function main() {
   try {
+    console.log('Initializing services...');
+    if (DEBUG) {
+      console.log('Debug mode enabled');
+    }
+    
     const rpcUrl = process.env.RPC_URL;
     const websocketPort = parseInt(process.env.WEBSOCKET_PORT) || 8080;
     const httpPort = parseInt(process.env.HTTP_PORT) || 3004;
