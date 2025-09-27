@@ -39,6 +39,10 @@ export class WSServer extends EventEmitter {
     await this.messageStore.initialize();
     await this.usernameStore.initialize();
     
+    // Track connections per IP
+    this.connectionsByIp = new Map();
+    this.maxConnectionsPerIp = 5;
+    
     // Cleanup rate limiter periodically
     setInterval(() => {
       this.rateLimiter.cleanup();
@@ -47,10 +51,30 @@ export class WSServer extends EventEmitter {
     this.wss = new WebSocketServer({ port: this.port });
 
     this.wss.on('connection', (ws, req) => {
-      console.log('New WebSocket connection');
-      
       const clientId = this.generateClientId();
       const clientIp = req.socket.remoteAddress;
+      const userAgent = req.headers['user-agent'];
+      const origin = req.headers.origin;
+      
+      // Check connection limit per IP
+      const currentConnections = this.connectionsByIp.get(clientIp) || 0;
+      if (currentConnections >= this.maxConnectionsPerIp) {
+        console.log(`Connection rejected - IP ${clientIp} has ${currentConnections} connections (max: ${this.maxConnectionsPerIp})`);
+        ws.close(1008, 'Too many connections from this IP');
+        return;
+      }
+      
+      // Update connection count
+      this.connectionsByIp.set(clientIp, currentConnections + 1);
+      
+      console.log(`New WebSocket connection:`, {
+        clientId,
+        clientIp,
+        origin,
+        userAgent: userAgent?.substring(0, 50) + '...',
+        totalClients: this.clients.size + 1,
+        ipConnections: currentConnections + 1
+      });
       const client = {
         id: clientId,
         ws,
@@ -80,7 +104,21 @@ export class WSServer extends EventEmitter {
       ws.on('close', () => {
         this.clients.delete(clientId);
         this.updateUserCount();
-        console.log(`Client ${clientId} disconnected`);
+        
+        // Decrease connection count for this IP
+        const currentConnections = this.connectionsByIp.get(clientIp) || 0;
+        if (currentConnections > 1) {
+          this.connectionsByIp.set(clientIp, currentConnections - 1);
+        } else {
+          this.connectionsByIp.delete(clientIp);
+        }
+        
+        console.log(`Client disconnected:`, {
+          clientId,
+          totalClients: this.clients.size,
+          authenticated: client.authenticated,
+          ipConnections: Math.max(0, currentConnections - 1)
+        });
       });
 
       ws.on('error', (error) => {
