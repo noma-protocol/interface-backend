@@ -1,15 +1,16 @@
 # Blockchain Monitor WebSocket Server
 
-A server-side blockchain event monitor that listens for events on Uniswap V3 pools and serves historical data via WebSocket to authenticated clients.
+A server-side blockchain event monitor that listens for events on Uniswap V3 pools and serves blockchain data via WebSocket to connected clients.
 
 ## Features
 
 - Real-time blockchain event monitoring for multiple pools
 - Persistent JSON-based event history storage
 - WebSocket server for real-time event streaming
-- Wallet signature-based authentication
+- Public access to blockchain data (no authentication required)
+- Optional wallet signature-based authentication for chat features
 - Client-specific event filtering
-- Session management for authenticated connections
+- Global trades aggregation across all pools
 
 ## Setup
 
@@ -36,9 +37,18 @@ npm start
 
 ## WebSocket API
 
-### Authentication
+### Public Endpoints (No Authentication Required)
 
-Send wallet signature to authenticate:
+All blockchain data endpoints are publicly accessible:
+
+- `subscribe` - Subscribe to pool events
+- `getHistory` - Get historical events
+- `getLatest` - Get recent events
+- `getGlobalTrades` - Get aggregated trades from all pools
+
+### Authentication (Optional)
+
+Authentication is only required for chat features. Send wallet signature to authenticate:
 ```json
 {
   "type": "auth",

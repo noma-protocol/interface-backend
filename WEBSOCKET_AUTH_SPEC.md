@@ -2,7 +2,24 @@
 
 ## Overview
 
-This document outlines the authentication implementation for the blockchain monitor WebSocket connection on the frontend. The system supports both authenticated and unauthenticated connections, with authentication providing access to additional features.
+This document outlines the authentication implementation for the blockchain monitor WebSocket connection on the frontend. The system supports both authenticated and unauthenticated connections.
+
+## Public Access (No Authentication Required)
+
+The following blockchain data endpoints are publicly accessible without authentication:
+
+- **Subscribe to Pools** - Monitor specific pool events
+- **Get Event History** - Retrieve historical blockchain events
+- **Get Latest Events** - Get recent blockchain events
+- **Get Global Trades** - Access aggregated trade data from all pools
+- **Receive Real-time Events** - Get live blockchain event streams
+
+## Authenticated Access
+
+Authentication is only required for interactive features:
+
+- **Trollbox Chat** - Send and receive chat messages
+- **Change Username** - Modify your display name
 
 ## Authentication Flow
 

@@ -4,6 +4,8 @@
 
 The blockchain monitor WebSocket provides real-time global trade data from multiple DEX pools and the ExchangeHelper contract. This guide explains how to integrate and display global trades on your frontend.
 
+**Important**: Global trades are publicly accessible and do **NOT** require authentication. Any connected client can request and receive trade data.
+
 ## What are Global Trades?
 
 Global trades aggregate swap events from:
