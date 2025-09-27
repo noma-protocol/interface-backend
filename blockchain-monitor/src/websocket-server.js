@@ -125,14 +125,13 @@ export class WSServer extends EventEmitter {
         console.error(`WebSocket error for client ${clientId}:`, error);
       });
 
-      // Send welcome message with recent chat history
-      const recentMessages = this.messageStore.getRecentMessages(50);
+      // Send connection confirmation and prompt for authentication
       ws.send(JSON.stringify({
-        type: 'welcome',
+        type: 'connection',
         clientId,
-        message: 'Connected to event stream',
-        recentMessages,
-        userCount: this.getActiveUserCount()
+        message: 'Connected to blockchain event stream',
+        requiresAuth: true,
+        authMessage: 'Please authenticate to receive blockchain events'
       }));
     });
 
