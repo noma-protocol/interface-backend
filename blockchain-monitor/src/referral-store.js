@@ -41,9 +41,27 @@ export class ReferralStore {
   async loadReferrals() {
     try {
       const data = await fs.readFile(this.referralsPath, 'utf-8');
-      this.referrals = JSON.parse(data);
+      const parsed = JSON.parse(data);
+      
+      // Validate the structure
+      if (!parsed || typeof parsed !== 'object') {
+        console.warn('Invalid referrals data, initializing with defaults');
+        this.referrals = { referred_users: {}, referrers: {} };
+        await this.saveReferrals();
+      } else {
+        // Ensure required properties exist
+        this.referrals = {
+          referred_users: parsed.referred_users || {},
+          referrers: parsed.referrers || {}
+        };
+      }
     } catch (error) {
       if (error.code === 'ENOENT') {
+        console.log('No referrals file found, creating new one');
+        this.referrals = { referred_users: {}, referrers: {} };
+        await this.saveReferrals();
+      } else if (error instanceof SyntaxError) {
+        console.error('Invalid JSON in referrals file, resetting to defaults');
         this.referrals = { referred_users: {}, referrers: {} };
         await this.saveReferrals();
       } else {
@@ -69,9 +87,23 @@ export class ReferralStore {
   async loadCodes() {
     try {
       const data = await fs.readFile(this.codesPath, 'utf-8');
-      this.codes = JSON.parse(data);
+      const parsed = JSON.parse(data);
+      
+      // Validate the structure
+      if (!parsed || typeof parsed !== 'object') {
+        console.warn('Invalid codes data, initializing with defaults');
+        this.codes = {};
+        await this.saveCodes();
+      } else {
+        this.codes = parsed;
+      }
     } catch (error) {
       if (error.code === 'ENOENT') {
+        console.log('No codes file found, creating new one');
+        this.codes = {};
+        await this.saveCodes();
+      } else if (error instanceof SyntaxError) {
+        console.error('Invalid JSON in codes file, resetting to defaults');
         this.codes = {};
         await this.saveCodes();
       } else {

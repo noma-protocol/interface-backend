@@ -136,15 +136,6 @@ export class ReferralTracker {
       
       console.log(`Tracked referral trade: ${trade.id} - ${traderAddress} traded ${tradeVolume.volumeMON} MON worth $${tradeVolume.volumeUSD}`);
       
-      // Optionally notify via HTTP API
-      if (this.httpApiUrl) {
-        try {
-          await axios.post(`${this.httpApiUrl}/api/referrals/track-trade`, trade);
-        } catch (error) {
-          console.error('Error notifying HTTP API:', error.message);
-        }
-      }
-      
     } catch (error) {
       console.error('Error tracking ExchangeHelper event:', error);
     }
