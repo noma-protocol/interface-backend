@@ -41,12 +41,31 @@ export class WSServer extends EventEmitter {
     
     // Track connections per IP
     this.connectionsByIp = new Map();
-    this.maxConnectionsPerIp = 5;
+    this.maxConnectionsPerIp = 10; // Increased from 5 to allow more connections during development
+    this.connectionAttempts = new Map(); // Track failed connection attempts
     
-    // Cleanup rate limiter periodically
+    // Periodic connection health check
+    this.startConnectionHealthCheck();
+    
+    // Cleanup rate limiter and connection attempts periodically
     setInterval(() => {
       this.rateLimiter.cleanup();
+      // Clear connection attempts after 5 minutes
+      this.connectionAttempts.clear();
     }, 60000);
+    
+    // Log connection stats periodically
+    setInterval(() => {
+      const stats = this.getConnectionStats();
+      if (stats.totalConnections > 0 || stats.connectionsByIp.size > 0) {
+        console.log('Connection Stats:', {
+          totalConnections: stats.totalConnections,
+          authenticatedConnections: stats.authenticatedConnections,
+          uniqueIPs: stats.connectionsByIp.size,
+          ipBreakdown: Array.from(stats.connectionsByIp.entries())
+        });
+      }
+    }, 30000); // Every 30 seconds
 
     this.wss = new WebSocketServer({ port: this.port });
 
@@ -59,7 +78,15 @@ export class WSServer extends EventEmitter {
       // Check connection limit per IP
       const currentConnections = this.connectionsByIp.get(clientIp) || 0;
       if (currentConnections >= this.maxConnectionsPerIp) {
-        console.log(`Connection rejected - IP ${clientIp} has ${currentConnections} connections (max: ${this.maxConnectionsPerIp})`);
+        // Track failed attempts
+        const attempts = this.connectionAttempts.get(clientIp) || 0;
+        this.connectionAttempts.set(clientIp, attempts + 1);
+        
+        // Log only every 10th attempt to reduce spam
+        if (attempts % 10 === 0) {
+          console.log(`Connection rejected - IP ${clientIp} has ${currentConnections} connections (max: ${this.maxConnectionsPerIp}) - ${attempts} total attempts`);
+        }
+        
         ws.close(1008, 'Too many connections from this IP');
         return;
       }
@@ -77,7 +104,7 @@ export class WSServer extends EventEmitter {
           ipConnections: currentConnections + 1
         });
       } else {
-        console.log(`New WebSocket connection from ${clientIp} (${this.clients.size + 1} total)`);
+        console.log(`New WebSocket connection from ${clientIp} (${this.clients.size + 1} total, ${currentConnections + 1} from this IP)`);
       }
       const client = {
         id: clientId,
@@ -104,8 +131,20 @@ export class WSServer extends EventEmitter {
           }));
         }
       });
+      
+      // Handle pong responses for connection health check
+      ws.on('pong', () => {
+        const client = this.clients.get(clientId);
+        if (client) {
+          client.pendingPong = false;
+        }
+      });
 
       ws.on('close', () => {
+        const clientInfo = this.clients.get(clientId);
+        const wasAuthenticated = clientInfo ? clientInfo.authenticated : false;
+        
+        // Remove client from map
         this.clients.delete(clientId);
         this.updateUserCount();
         
@@ -121,11 +160,11 @@ export class WSServer extends EventEmitter {
           console.log(`Client disconnected:`, {
             clientId,
             totalClients: this.clients.size,
-            authenticated: client.authenticated,
+            authenticated: wasAuthenticated,
             ipConnections: Math.max(0, currentConnections - 1)
           });
         } else {
-          console.log(`Client disconnected (${this.clients.size} remaining)`);
+          console.log(`Client disconnected from ${clientIp} (${this.clients.size} remaining, ${Math.max(0, currentConnections - 1)} from this IP)`);
         }
       });
 
@@ -715,10 +754,59 @@ export class WSServer extends EventEmitter {
     });
   }
 
+  getConnectionStats() {
+    let authenticatedCount = 0;
+    for (const client of this.clients.values()) {
+      if (client.authenticated) authenticatedCount++;
+    }
+    
+    return {
+      totalConnections: this.clients.size,
+      authenticatedConnections: authenticatedCount,
+      connectionsByIp: new Map(this.connectionsByIp)
+    };
+  }
+
   stop() {
     if (this.wss) {
       this.wss.close();
       console.log('WebSocket server stopped');
     }
+  }
+  
+  // Periodic health check to detect dead connections
+  startConnectionHealthCheck() {
+    setInterval(() => {
+      this.clients.forEach((client, clientId) => {
+        // Check if connection is alive
+        if (client.ws.readyState === client.ws.OPEN) {
+          // Send ping to check if client is still alive
+          client.ws.ping();
+          
+          // Mark as pending pong
+          client.pendingPong = true;
+          
+          // Set timeout to close if no pong received
+          setTimeout(() => {
+            if (client.pendingPong && this.clients.has(clientId)) {
+              if (global.DEBUG) {
+                console.log(`Closing stale connection: ${clientId}`);
+              }
+              client.ws.terminate(); // Force close
+            }
+          }, 5000); // 5 second timeout
+        } else if (client.ws.readyState !== client.ws.CONNECTING) {
+          // Connection is closed or closing, clean it up
+          this.clients.delete(clientId);
+          const clientIp = client.clientIp;
+          const currentConnections = this.connectionsByIp.get(clientIp) || 0;
+          if (currentConnections > 1) {
+            this.connectionsByIp.set(clientIp, currentConnections - 1);
+          } else {
+            this.connectionsByIp.delete(clientIp);
+          }
+        }
+      });
+    }, 30000); // Check every 30 seconds
   }
 }
