@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { MessageStore } from './message-store.js';
 import { UsernameStore } from './username-store.js';
 import { RateLimiter } from './rate-limiter.js';
+import { SessionManager } from './session-manager.js';
 
 // Helper function to convert BigInt to string in nested objects
 function bigIntReplacer(key, value) {
@@ -27,6 +28,7 @@ export class WSServer extends EventEmitter {
     this.usernameStore = new UsernameStore();
     this.rateLimiter = new RateLimiter();
     this.kickedUsers = new Map(); // Track kicked users
+    this.sessionManager = new SessionManager(); // Persistent session management
     
     // Admin addresses (can be configured)
     this.adminAddresses = new Set([
@@ -57,12 +59,14 @@ export class WSServer extends EventEmitter {
     // Log connection stats periodically
     setInterval(() => {
       const stats = this.getConnectionStats();
+      const sessionStats = this.sessionManager.getStats();
       if (stats.totalConnections > 0 || stats.connectionsByIp.size > 0) {
         console.log('Connection Stats:', {
           totalConnections: stats.totalConnections,
           authenticatedConnections: stats.authenticatedConnections,
           uniqueIPs: stats.connectionsByIp.size,
-          ipBreakdown: Array.from(stats.connectionsByIp.entries())
+          ipBreakdown: Array.from(stats.connectionsByIp.entries()),
+          sessions: sessionStats
         });
       }
     }, 30000); // Every 30 seconds
@@ -249,17 +253,20 @@ export class WSServer extends EventEmitter {
         client.authenticated = true;
         client.address = address;
         client.authTimestamp = Date.now();
-        client.sessionToken = uuidv4();
         
         // Get username
         const username = this.usernameStore.getUsername(address);
+        
+        // Create or update session
+        const session = this.sessionManager.createSession(address, username);
+        client.sessionToken = session.token;
         
         client.ws.send(JSON.stringify({
           type: 'authenticated',
           success: true,
           address,
           username,
-          sessionToken: client.sessionToken,
+          sessionToken: session.token,
           cooldownInfo: {
             changeCount: this.usernameStore.getChangeCount(address),
             canChange: this.usernameStore.canChangeUsername(address)
@@ -548,6 +555,11 @@ export class WSServer extends EventEmitter {
     const result = await this.usernameStore.setUsername(client.address, trimmedUsername);
 
     if (result.success) {
+      // Update session with new username
+      if (client.sessionToken) {
+        this.sessionManager.updateSessionUsername(client.sessionToken, result.username);
+      }
+      
       client.ws.send(JSON.stringify({
         type: 'usernameChanged',
         username: result.username,
@@ -578,37 +590,36 @@ export class WSServer extends EventEmitter {
   async handleCheckAuth(client, data) {
     const { sessionToken } = data;
     
-    // Check if client is authenticated and session is valid
-    if (client.authenticated && client.sessionToken === sessionToken) {
-      // Check session age (30 minute timeout)
-      const sessionAge = Date.now() - client.authTimestamp;
-      const maxSessionAge = 30 * 60 * 1000; // 30 minutes
+    // Validate session with SessionManager
+    const session = this.sessionManager.getSession(sessionToken);
+    
+    if (session) {
+      // Session is valid - update client state
+      client.authenticated = true;
+      client.address = session.address;
+      client.sessionToken = sessionToken;
+      client.authTimestamp = session.createdAt;
       
-      if (sessionAge > maxSessionAge) {
-        // Session expired
-        client.authenticated = false;
-        client.ws.send(JSON.stringify({
-          type: 'clearAuth',
-          message: 'Session expired. Please re-authenticate.'
-        }));
-        return;
-      }
+      // Get current username (might have changed)
+      const username = this.usernameStore.getUsername(session.address);
       
-      // Session is valid
-      const username = this.usernameStore.getUsername(client.address);
       client.ws.send(JSON.stringify({
         type: 'checkAuthResponse',
         authenticated: true,
-        address: client.address,
+        address: session.address,
         username,
-        sessionToken: client.sessionToken,
+        sessionToken: sessionToken,
         cooldownInfo: {
-          changeCount: this.usernameStore.getChangeCount(client.address),
-          canChange: this.usernameStore.canChangeUsername(client.address)
+          changeCount: this.usernameStore.getChangeCount(session.address),
+          canChange: this.usernameStore.canChangeUsername(session.address)
         }
       }));
+      
+      // Update user count
+      this.updateUserCount();
     } else {
-      // Not authenticated or invalid session
+      // Session not found or expired
+      client.authenticated = false;
       client.ws.send(JSON.stringify({
         type: 'checkAuthResponse',
         authenticated: false
