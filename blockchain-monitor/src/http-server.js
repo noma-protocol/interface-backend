@@ -238,7 +238,7 @@ export class HTTPServer {
     });
 
     // Get vault information
-    this.app.get('/vault', async (req, res) => {
+    this.app.get('/vaults', async (req, res) => {
       try {
         if (!this.vaultService) {
           return res.status(503).json({ 
@@ -293,7 +293,7 @@ export class HTTPServer {
       console.log(`HTTP server listening on port ${this.port}`);
       console.log(`Referral API available at http://localhost:${this.port}/api/referrals`);
       console.log(`Tokens API available at http://localhost:${this.port}/api/tokens`);
-      console.log(`Vault API available at http://localhost:${this.port}/vault`);
+      console.log(`Vault API available at http://localhost:${this.port}/vaults`);
     });
   }
 
