@@ -176,13 +176,15 @@ export class WSServer extends EventEmitter {
         console.error(`WebSocket error for client ${clientId}:`, error);
       });
 
-      // Send connection confirmation
+      // Send connection confirmation with recent messages
+      const recentMessages = this.messageStore.getRecentMessages(50);
       ws.send(JSON.stringify({
         type: 'connection',
         clientId,
         message: 'Connected to blockchain event stream',
         requiresAuth: false,
-        authMessage: 'Authentication optional for public blockchain data'
+        authMessage: 'Authentication optional for public blockchain data',
+        recentMessages
       }));
     });
 
@@ -234,6 +236,10 @@ export class WSServer extends EventEmitter {
       case 'checkAuth':
         await this.handleCheckAuth(client, data);
         break;
+        
+      case 'getMessages':
+        await this.handleGetMessages(client, data);
+        break;
 
       default:
         client.ws.send(JSON.stringify({
@@ -268,6 +274,10 @@ export class WSServer extends EventEmitter {
           isNew: session.createdAt === Date.now()
         });
         
+        // Get recent messages for authenticated users
+        const recentMessages = this.messageStore.getRecentMessages(50);
+        const userCount = this.getActiveUserCount();
+        
         client.ws.send(JSON.stringify({
           type: 'authenticated',
           success: true,
@@ -277,7 +287,9 @@ export class WSServer extends EventEmitter {
           cooldownInfo: {
             changeCount: this.usernameStore.getChangeCount(address),
             canChange: this.usernameStore.canChangeUsername(address)
-          }
+          },
+          recentMessages,
+          userCount
         }));
         
         // Update user count
@@ -594,6 +606,16 @@ export class WSServer extends EventEmitter {
     }));
   }
 
+  async handleGetMessages(client, data) {
+    const { limit = 50 } = data;
+    const messages = this.messageStore.getRecentMessages(limit);
+    
+    client.ws.send(JSON.stringify({
+      type: 'messages',
+      messages
+    }));
+  }
+
   async handleCheckAuth(client, data) {
     const { sessionToken } = data;
     
@@ -617,6 +639,10 @@ export class WSServer extends EventEmitter {
       // Get current username (might have changed)
       const username = this.usernameStore.getUsername(session.address);
       
+      // Get recent messages for authenticated users
+      const recentMessages = this.messageStore.getRecentMessages(50);
+      const userCount = this.getActiveUserCount();
+      
       client.ws.send(JSON.stringify({
         type: 'checkAuthResponse',
         authenticated: true,
@@ -626,7 +652,9 @@ export class WSServer extends EventEmitter {
         cooldownInfo: {
           changeCount: this.usernameStore.getChangeCount(session.address),
           canChange: this.usernameStore.canChangeUsername(session.address)
-        }
+        },
+        recentMessages,
+        userCount
       }));
       
       // Update user count
