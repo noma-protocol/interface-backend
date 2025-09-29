@@ -4,11 +4,33 @@ export class SessionManager {
   constructor(maxSessionAge = 30 * 60 * 1000) { // 30 minutes default
     this.sessions = new Map();
     this.maxSessionAge = maxSessionAge;
+    this.addressToToken = new Map(); // Track latest token per address
     
     // Cleanup expired sessions every 5 minutes
     setInterval(() => {
       this.cleanupExpiredSessions();
     }, 5 * 60 * 1000);
+  }
+
+  getOrCreateSession(address, username) {
+    const normalizedAddress = address.toLowerCase();
+    
+    // Check if there's an existing valid session
+    const existingToken = this.addressToToken.get(normalizedAddress);
+    if (existingToken) {
+      const existingSession = this.getSession(existingToken);
+      if (existingSession) {
+        console.log(`Found existing session for ${address}: ${existingToken}`);
+        // Update username if it changed
+        if (existingSession.username !== username) {
+          existingSession.username = username;
+        }
+        return existingSession;
+      }
+    }
+    
+    // No valid session exists, create new one
+    return this.createSession(address, username);
   }
 
   createSession(address, username) {
@@ -22,13 +44,9 @@ export class SessionManager {
     };
     
     this.sessions.set(sessionToken, session);
+    this.addressToToken.set(address.toLowerCase(), sessionToken);
     
-    // Also store by address for easy lookup
-    const existingToken = this.findSessionByAddress(address);
-    if (existingToken) {
-      this.sessions.delete(existingToken);
-    }
-    
+    console.log(`Created new session for ${address}: ${sessionToken}`);
     return session;
   }
 
@@ -87,6 +105,11 @@ export class SessionManager {
     for (const [token, session] of this.sessions) {
       if (now - session.createdAt > this.maxSessionAge) {
         this.sessions.delete(token);
+        // Also clean up address mapping
+        const currentToken = this.addressToToken.get(session.address);
+        if (currentToken === token) {
+          this.addressToToken.delete(session.address);
+        }
         cleaned++;
       }
     }

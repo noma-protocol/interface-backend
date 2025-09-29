@@ -257,9 +257,16 @@ export class WSServer extends EventEmitter {
         // Get username
         const username = this.usernameStore.getUsername(address);
         
-        // Create or update session
-        const session = this.sessionManager.createSession(address, username);
+        // Get or create session
+        const session = this.sessionManager.getOrCreateSession(address, username);
         client.sessionToken = session.token;
+        
+        console.log(`Session for ${address}:`, {
+          token: session.token,
+          username: session.username,
+          clientId: client.id,
+          isNew: session.createdAt === Date.now()
+        });
         
         client.ws.send(JSON.stringify({
           type: 'authenticated',
@@ -590,10 +597,17 @@ export class WSServer extends EventEmitter {
   async handleCheckAuth(client, data) {
     const { sessionToken } = data;
     
+    console.log(`CheckAuth request from client ${client.id} with token: ${sessionToken}`);
+    
     // Validate session with SessionManager
     const session = this.sessionManager.getSession(sessionToken);
     
     if (session) {
+      console.log(`Session found for token ${sessionToken}:`, {
+        address: session.address,
+        username: session.username,
+        age: Date.now() - session.createdAt
+      });
       // Session is valid - update client state
       client.authenticated = true;
       client.address = session.address;
@@ -619,6 +633,9 @@ export class WSServer extends EventEmitter {
       this.updateUserCount();
     } else {
       // Session not found or expired
+      console.log(`Session NOT found for token ${sessionToken}`);
+      console.log('Current sessions:', this.sessionManager.getStats());
+      
       client.authenticated = false;
       client.ws.send(JSON.stringify({
         type: 'checkAuthResponse',
