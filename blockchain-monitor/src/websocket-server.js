@@ -99,11 +99,20 @@ export class WSServer extends EventEmitter {
       if (stats.totalConnections > 0 || stats.connectionsByIp.size > 0) {
         console.log('Connection Stats:', {
           totalConnections: stats.totalConnections,
+          openConnections: stats.openConnections,
+          closingConnections: stats.closingConnections,
+          closedConnections: stats.closedConnections,
           authenticatedConnections: stats.authenticatedConnections,
           uniqueIPs: stats.connectionsByIp.size,
           ipBreakdown: Array.from(stats.connectionsByIp.entries()),
           sessions: sessionStats
         });
+
+        // Auto-cleanup if we detect closed connections
+        if (stats.closedConnections > 0) {
+          console.log(`[Auto Cleanup] Detected ${stats.closedConnections} closed connections, cleaning up...`);
+          this.cleanupStaleConnections();
+        }
       }
     }, 30000); // Every 30 seconds
 
@@ -2072,15 +2081,73 @@ export class WSServer extends EventEmitter {
 
   getConnectionStats() {
     let authenticatedCount = 0;
+    let openConnections = 0;
+    let closedConnections = 0;
+    let closingConnections = 0;
+
     for (const client of this.clients.values()) {
       if (client.authenticated) authenticatedCount++;
+
+      if (client.ws.readyState === 1) openConnections++;
+      else if (client.ws.readyState === 2) closingConnections++;
+      else if (client.ws.readyState === 3) closedConnections++;
     }
-    
+
     return {
       totalConnections: this.clients.size,
       authenticatedConnections: authenticatedCount,
+      openConnections,
+      closingConnections,
+      closedConnections,
       connectionsByIp: new Map(this.connectionsByIp)
     };
+  }
+
+  // Manually clean up stale connections
+  cleanupStaleConnections() {
+    let cleaned = 0;
+    this.clients.forEach((client, clientId) => {
+      // Clean up connections that are not OPEN (readyState !== 1)
+      if (client.ws.readyState !== 1) {
+        console.log(`[Manual Cleanup] Removing stale connection: ${clientId} (state: ${client.ws.readyState})`);
+
+        // Clean up joined streams
+        if (client.joinedStreams) {
+          for (const streamId of client.joinedStreams) {
+            const room = this.streamRooms.get(streamId);
+            if (room) room.removeViewer(clientId);
+          }
+        }
+
+        // Clean up active streams
+        for (const [streamId, streamInfo] of this.activeStreams) {
+          if (streamInfo.clientId === clientId) {
+            this.activeStreams.delete(streamId);
+            this.streamRooms.delete(streamId);
+          }
+        }
+
+        // Clean up maps
+        this.clients.delete(clientId);
+        if (client.address) this.addressToClientId.delete(client.address);
+
+        // Clean up IP count
+        if (client.clientIp) {
+          const currentConnections = this.connectionsByIp.get(client.clientIp) || 0;
+          if (currentConnections > 1) {
+            this.connectionsByIp.set(client.clientIp, currentConnections - 1);
+          } else {
+            this.connectionsByIp.delete(client.clientIp);
+          }
+        }
+
+        cleaned++;
+      }
+    });
+
+    this.updateUserCount();
+    console.log(`[Manual Cleanup] Cleaned up ${cleaned} stale connections`);
+    return cleaned;
   }
 
   stop() {
@@ -2098,29 +2165,59 @@ export class WSServer extends EventEmitter {
         if (client.ws.readyState === client.ws.OPEN) {
           // Send ping to check if client is still alive
           client.ws.ping();
-          
+
           // Mark as pending pong
           client.pendingPong = true;
-          
+
           // Set timeout to close if no pong received
           setTimeout(() => {
             if (client.pendingPong && this.clients.has(clientId)) {
-              if (global.DEBUG) {
-                console.log(`Closing stale connection: ${clientId}`);
-              }
-              client.ws.terminate(); // Force close
+              console.log(`[Health Check] Closing stale connection: ${clientId} (${client.address || 'unauthenticated'})`);
+              client.ws.terminate(); // Force close - will trigger 'close' event
             }
           }, 5000); // 5 second timeout
         } else if (client.ws.readyState !== client.ws.CONNECTING) {
-          // Connection is closed or closing, clean it up
-          this.clients.delete(clientId);
-          const clientIp = client.clientIp;
-          const currentConnections = this.connectionsByIp.get(clientIp) || 0;
-          if (currentConnections > 1) {
-            this.connectionsByIp.set(clientIp, currentConnections - 1);
-          } else {
-            this.connectionsByIp.delete(clientIp);
+          // Connection is closed or closing, clean it up manually
+          console.log(`[Health Check] Cleaning up dead connection: ${clientId} (readyState: ${client.ws.readyState})`);
+
+          // Clean up joined streams
+          if (client.joinedStreams) {
+            for (const streamId of client.joinedStreams) {
+              const room = this.streamRooms.get(streamId);
+              if (room) {
+                room.removeViewer(clientId);
+              }
+            }
           }
+
+          // Clean up active streams
+          for (const [streamId, streamInfo] of this.activeStreams) {
+            if (streamInfo.clientId === clientId) {
+              this.activeStreams.delete(streamId);
+              this.streamRooms.delete(streamId);
+            }
+          }
+
+          // Clean up client from map
+          this.clients.delete(clientId);
+
+          // Clean up address mapping
+          if (client.address) {
+            this.addressToClientId.delete(client.address);
+          }
+
+          // Clean up IP connection count
+          const clientIp = client.clientIp;
+          if (clientIp) {
+            const currentConnections = this.connectionsByIp.get(clientIp) || 0;
+            if (currentConnections > 1) {
+              this.connectionsByIp.set(clientIp, currentConnections - 1);
+            } else {
+              this.connectionsByIp.delete(clientIp);
+            }
+          }
+
+          this.updateUserCount();
         }
       });
     }, 30000); // Check every 30 seconds
