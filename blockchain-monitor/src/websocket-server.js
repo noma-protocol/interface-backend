@@ -1495,8 +1495,9 @@ export class WSServer extends EventEmitter {
           type: 'webrtc-request',
           action: 'request-offer',
           streamId: data.streamId,
-          from: data.from || client.address,
-          clientId: client.id
+          from: client.address || client.id, // Always use server's verified client info
+          fromClientId: client.id, // Also send client ID for direct routing
+          fromAddress: client.address // And address for convenience
         };
         console.log('[WebRTC Request] Forwarding to broadcaster:', message);
         targetClient.ws.send(JSON.stringify(message));
@@ -1513,7 +1514,8 @@ export class WSServer extends EventEmitter {
   async handleWebRTCOffer(client, data) {
     // Broadcaster sends offer to viewer
     if (data.to) {
-      const from = data.from || client.address || client.id;
+      // Always use server's verified client info, never trust client-provided 'from'
+      const from = client.address || client.id;
 
       // Try by clientId first
       let targetClient = this.clients.get(data.to);
@@ -1522,6 +1524,8 @@ export class WSServer extends EventEmitter {
           type: 'webrtc-offer',
           streamId: data.streamId,
           from: from,
+          fromClientId: client.id,
+          fromAddress: client.address,
           offer: data.offer
         }));
 
@@ -1537,6 +1541,8 @@ export class WSServer extends EventEmitter {
           type: 'webrtc-offer',
           streamId: data.streamId,
           from: from,
+          fromClientId: client.id,
+          fromAddress: client.address,
           offer: data.offer
         }));
 
@@ -1549,6 +1555,7 @@ export class WSServer extends EventEmitter {
   async handleWebRTCAnswer(client, data) {
     // Viewer sends answer to broadcaster
     if (data.to) {
+      // Always use server's verified client info
       const from = client.address || client.id;
 
       // Try by address first
@@ -1558,6 +1565,8 @@ export class WSServer extends EventEmitter {
           type: 'webrtc-answer',
           streamId: data.streamId,
           from: from,
+          fromClientId: client.id,
+          fromAddress: client.address,
           answer: data.answer
         }));
 
@@ -1573,6 +1582,8 @@ export class WSServer extends EventEmitter {
           type: 'webrtc-answer',
           streamId: data.streamId,
           from: from,
+          fromClientId: client.id,
+          fromAddress: client.address,
           answer: data.answer
         }));
 
@@ -1585,7 +1596,8 @@ export class WSServer extends EventEmitter {
   async handleWebRTCIce(client, data) {
     // Exchange ICE candidates
     if (data.to) {
-      const from = data.from || client.address || client.id;
+      // Always use server's verified client info
+      const from = client.address || client.id;
       const connectionKey = this.getConnectionKey(data.to, from, data.streamId);
 
       // Try both clientId and address
@@ -1605,6 +1617,8 @@ export class WSServer extends EventEmitter {
             type: 'webrtc-ice',
             streamId: data.streamId,
             from: from,
+            fromClientId: client.id,
+            fromAddress: client.address,
             candidate: data.candidate
           });
           console.log(`[ICE Buffer] Buffered candidate for ${connectionKey}, total: ${this.pendingIceCandidates.get(connectionKey).length}`);
@@ -1614,6 +1628,8 @@ export class WSServer extends EventEmitter {
             type: 'webrtc-ice',
             streamId: data.streamId,
             from: from,
+            fromClientId: client.id,
+            fromAddress: client.address,
             candidate: data.candidate
           }));
         }
@@ -1622,6 +1638,7 @@ export class WSServer extends EventEmitter {
 
       // If target not found, log detailed info
       console.warn(`[ICE] Failed to send ICE candidate to ${data.to}`);
+      console.warn(`[ICE] Sender: ${client.id} (${client.address})`);
       console.warn(`[ICE] Available clients: ${Array.from(this.clients.keys()).join(', ')}`);
       console.warn(`[ICE] targetClient found: ${!!targetClient}, targetByAddress found: ${!!targetByAddress}`);
       if (targetClient) console.warn(`[ICE] targetClient readyState: ${targetClient.ws.readyState}`);
