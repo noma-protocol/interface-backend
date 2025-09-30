@@ -1029,7 +1029,7 @@ export class WSServer extends EventEmitter {
     const streamerAddress = client.address || streamer || data.from;
     const username = this.usernameStore.getUsername(streamerAddress) || data.username || 'anonymous';
     const streamId = providedStreamId || roomId || `stream-${Date.now()}-${Math.random().toString(36).substring(7)}`;
-    
+
     console.log('[Stream Start]', {
       streamId,
       title,
@@ -1037,7 +1037,28 @@ export class WSServer extends EventEmitter {
       clientId: client.id,
       clientAddress: client.address
     });
-    
+
+    // Check if this streamer already has an active stream and clean it up
+    for (const [existingStreamId, existingStreamInfo] of this.activeStreams) {
+      if (existingStreamInfo.clientId === client.id || existingStreamInfo.streamer === streamerAddress) {
+        console.log(`[Stream Start] Cleaning up existing stream ${existingStreamId} for ${streamerAddress}`);
+        this.activeStreams.delete(existingStreamId);
+        this.streamRooms.delete(existingStreamId);
+      }
+    }
+
+    // Check if stream ID already exists
+    if (this.activeStreams.has(streamId)) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream ID already exists',
+        streamId
+      }));
+      return;
+    }
+
+    const startedAt = data.startedAt || Date.now();
+
     // Store active stream
     const streamInfo = {
       streamId,
@@ -1047,20 +1068,20 @@ export class WSServer extends EventEmitter {
       roomId: roomId || streamId,
       pool,
       description: description || '',
-      quality,
-      startedAt: data.startedAt || Date.now(),
+      quality: quality || 'sd',
+      startedAt,
       clientId: client.id,
       viewerCount: 0
     };
     this.activeStreams.set(streamId, streamInfo);
-    
+
     // Create stream room
     const room = new StreamRoom(streamId, client, streamerAddress);
     this.streamRooms.set(streamId, room);
-    
+
     // Create stream message
     const message = `🎥 ${username} started streaming: "${title || 'Untitled Stream'}"`;
-    
+
     // Send acknowledgment to the streamer
     client.ws.send(JSON.stringify({
       type: 'stream-start-ack',
@@ -1069,33 +1090,37 @@ export class WSServer extends EventEmitter {
       message,
       timestamp: Date.now()
     }));
-    
-    // Broadcast to all clients - using test-webRTC format
+
+    // Broadcast to all clients - complete format with all fields
     const notification = {
       type: 'stream-start',
       streamId,
-      title: title || 'Untitled Stream',
-      description: description || '',
-      streamer: streamerAddress || client.id
+      title: streamInfo.title,
+      description: streamInfo.description,
+      quality: streamInfo.quality,
+      streamer: streamerAddress || client.id,
+      username,
+      startedAt,
+      timestamp: Date.now()
     };
-    
+
     // Also send legacy format for compatibility
     const legacyNotification = {
       type: 'stream-notification',
       action: 'started',
       streamId,
-      roomId,
+      roomId: streamInfo.roomId,
       streamer: streamerAddress || 'anonymous',
       username,
-      title,
-      description,
-      quality,
+      title: streamInfo.title,
+      description: streamInfo.description,
+      quality: streamInfo.quality,
       message,
       timestamp: Date.now()
     };
-    
+
     console.log('[Stream Start] Broadcasting notifications');
-    
+
     // Send to all connected clients
     for (const [clientId, otherClient] of this.clients) {
       if (otherClient.ws.readyState === 1) {
