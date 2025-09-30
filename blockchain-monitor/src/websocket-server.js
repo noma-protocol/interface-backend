@@ -242,7 +242,7 @@ export class WSServer extends EventEmitter {
           if (streamInfo.clientId === clientId) {
             this.activeStreams.delete(streamId);
             this.streamRooms.delete(streamId);
-            
+
             // Notify all clients that the stream ended
             const notification = {
               type: 'stream-notification',
@@ -255,7 +255,7 @@ export class WSServer extends EventEmitter {
               message: `📴 ${streamInfo.username}'s stream ended unexpectedly`,
               timestamp: Date.now()
             };
-            
+
             for (const [otherId, otherClient] of this.clients) {
               if (otherId !== clientId) {
                 otherClient.ws.send(JSON.stringify(notification));
@@ -263,7 +263,21 @@ export class WSServer extends EventEmitter {
             }
           }
         }
-        
+
+        // Notify about peer connection cleanup - tell all clients to clean up connections to this peer
+        const peerDisconnectNotification = {
+          type: 'peer-disconnected',
+          peerId: clientId,
+          peerAddress: clientInfo.address,
+          timestamp: Date.now()
+        };
+
+        for (const [otherId, otherClient] of this.clients) {
+          if (otherId !== clientId && otherClient.ws.readyState === 1) {
+            otherClient.ws.send(JSON.stringify(peerDisconnectNotification));
+          }
+        }
+
         // Remove client from map
         this.clients.delete(clientId);
         
@@ -1606,8 +1620,12 @@ export class WSServer extends EventEmitter {
         return;
       }
 
-      // If target not found, log warning
-      console.warn(`Failed to send ICE candidate to ${data.to}`);
+      // If target not found, log detailed info
+      console.warn(`[ICE] Failed to send ICE candidate to ${data.to}`);
+      console.warn(`[ICE] Available clients: ${Array.from(this.clients.keys()).join(', ')}`);
+      console.warn(`[ICE] targetClient found: ${!!targetClient}, targetByAddress found: ${!!targetByAddress}`);
+      if (targetClient) console.warn(`[ICE] targetClient readyState: ${targetClient.ws.readyState}`);
+      if (targetByAddress) console.warn(`[ICE] targetByAddress readyState: ${targetByAddress.ws.readyState}`);
     }
   }
 
