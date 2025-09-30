@@ -403,14 +403,7 @@ export class WSServer extends EventEmitter {
         break;
 
       case 'request-active-streams':
-        await this.handleRequestActiveStreams(client);
-        break;
-
       case 'get-active-streams':
-        await this.handleGetActiveStreams(client);
-        break;
-
-      case 'request-active-streams':
         await this.handleRequestActiveStreams(client);
         break;
 
@@ -904,57 +897,20 @@ export class WSServer extends EventEmitter {
   async handleRequestActiveStreams(client) {
     // Get all pools that have at least one subscriber
     const allActivePools = new Set();
-    
-    for (const [clientId, otherClient] of this.clients) {
-      if (otherClient.pools && otherClient.pools.length > 0) {
-        otherClient.pools.forEach(pool => allActivePools.add(pool));
-      }
-    }
-    
-    // Get all active video streams with viewer count
-    const activeStreams = Array.from(this.activeStreams.values()).map(stream => {
-      const room = this.streamRooms.get(stream.streamId);
-      const viewerCount = room ? room.getViewerCount() : 0;
-      
-      return {
-        streamId: stream.streamId,
-        roomId: stream.roomId,
-        streamer: stream.streamer,
-        username: stream.username,
-        title: stream.title,
-        description: stream.description,
-        quality: stream.quality,
-        startedAt: stream.startedAt,
-        viewerCount,
-        clientId: stream.clientId,
-        isStreamerOnline: this.clients.has(stream.clientId)
-      };
-    });
-    
-    // Send pools, streams, and client's subscriptions
-    client.ws.send(JSON.stringify({
-      type: 'active-streams',
-      pools: Array.from(allActivePools), // All pools with active subscribers
-      mySubscriptions: client.pools || [], // This client's subscriptions
-      activeStreams: activeStreams // All active video streams
-    }));
-  }
 
-  async handleGetActiveStreams(client) {
-    // Get all pools that have at least one subscriber
-    const allActivePools = new Set();
-    
     for (const [clientId, otherClient] of this.clients) {
       if (otherClient.pools && otherClient.pools.length > 0) {
         otherClient.pools.forEach(pool => allActivePools.add(pool));
       }
     }
-    
+
+    console.log(`[Request Active Streams] Total active streams: ${this.activeStreams.size}`);
+
     // Get all active video streams with viewer count
     const activeStreams = Array.from(this.activeStreams.values()).map(stream => {
       const room = this.streamRooms.get(stream.streamId);
       const viewerCount = room ? room.getViewerCount() : 0;
-      
+
       return {
         streamId: stream.streamId,
         roomId: stream.roomId,
@@ -969,7 +925,9 @@ export class WSServer extends EventEmitter {
         isStreamerOnline: this.clients.has(stream.clientId)
       };
     });
-    
+
+    console.log(`[Request Active Streams] Sending ${activeStreams.length} streams to client`);
+
     // Send pools, streams, and client's subscriptions
     client.ws.send(JSON.stringify({
       type: 'active-streams',
@@ -1836,15 +1794,6 @@ export class WSServer extends EventEmitter {
       clients: clientsList,
       totalCount: this.clients.size,
       authenticatedCount: clientsList.filter(c => c.authenticated).length
-    }));
-  }
-
-  async handleRequestActiveStreams(client) {
-    // Send list of active streams
-    const streamsList = Array.from(this.activeStreams.values());
-    client.ws.send(JSON.stringify({
-      type: 'active-streams',
-      activeStreams: streamsList
     }));
   }
 
