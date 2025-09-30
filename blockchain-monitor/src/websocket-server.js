@@ -54,6 +54,7 @@ export class WSServer extends EventEmitter {
     this.authManager = authManager;
     this.wss = null;
     this.clients = new Map();
+    this.addressToClientId = new Map(); // address -> clientId mapping
     
     // Trollbox components
     this.messageStore = new MessageStore();
@@ -303,6 +304,12 @@ export class WSServer extends EventEmitter {
         
         // Remove client from map
         this.clients.delete(clientId);
+        
+        // Clean up address mapping
+        if (clientInfo && clientInfo.address) {
+          this.addressToClientId.delete(clientInfo.address);
+        }
+        
         this.updateUserCount();
         
         // Decrease connection count for this IP
@@ -413,6 +420,10 @@ export class WSServer extends EventEmitter {
         await this.handleGetActiveStreams(client);
         break;
 
+      case 'request-active-streams':
+        await this.handleRequestActiveStreams(client);
+        break;
+
       case 'stream-notification':
         await this.handleStreamNotification(client, data);
         break;
@@ -459,9 +470,37 @@ export class WSServer extends EventEmitter {
       case 'webrtc-ice':
         await this.handleWebRTCIce(client, data);
         break;
-        
-      case 'request-active-streams':
-        await this.handleRequestActiveStreams(client);
+
+      case 'join':
+        await this.handleJoin(client, data);
+        break;
+
+      case 'leave':
+        await this.handleLeave(client, data);
+        break;
+
+      case 'offer':
+        await this.handleRoomOffer(client, data);
+        break;
+
+      case 'answer':
+        await this.handleRoomAnswer(client, data);
+        break;
+
+      case 'ice-candidate':
+        await this.handleRoomIceCandidate(client, data);
+        break;
+
+      case 'test-request-offer':
+        await this.handleTestRequestOffer(client, data);
+        break;
+
+      case 'echo':
+        await this.handleEcho(client, data);
+        break;
+
+      case 'broadcast-test':
+        await this.handleBroadcastTest(client, data);
         break;
 
       // Debug handler to test message routing
@@ -508,6 +547,8 @@ export class WSServer extends EventEmitter {
               c.ws.close(1000, 'Duplicate connection');
             }
           }
+          // Update address mapping
+          this.addressToClientId.set(address, client.id);
         }
         
         // Get username
@@ -993,7 +1034,15 @@ export class WSServer extends EventEmitter {
     // Use the streamer address from the message if client is not authenticated
     const streamerAddress = client.address || streamer || data.from;
     const username = this.usernameStore.getUsername(streamerAddress) || data.username || 'anonymous';
-    const streamId = providedStreamId || roomId || `${streamerAddress || client.id}_${Date.now()}`;
+    const streamId = providedStreamId || roomId || `stream-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+    
+    console.log('[Stream Start]', {
+      streamId,
+      title,
+      streamer: streamerAddress,
+      clientId: client.id,
+      clientAddress: client.address
+    });
     
     // Store active stream
     const streamInfo = {
@@ -1003,10 +1052,11 @@ export class WSServer extends EventEmitter {
       title: title || 'Untitled Stream',
       roomId: roomId || streamId,
       pool,
-      description,
+      description: description || '',
       quality,
       startedAt: data.startedAt || Date.now(),
-      clientId: client.id
+      clientId: client.id,
+      viewerCount: 0
     };
     this.activeStreams.set(streamId, streamInfo);
     
@@ -1026,8 +1076,17 @@ export class WSServer extends EventEmitter {
       timestamp: Date.now()
     }));
     
-    // Broadcast to all clients
+    // Broadcast to all clients - using test-webRTC format
     const notification = {
+      type: 'stream-start',
+      streamId,
+      title: title || 'Untitled Stream',
+      description: description || '',
+      streamer: streamerAddress || client.id
+    };
+    
+    // Also send legacy format for compatibility
+    const legacyNotification = {
       type: 'stream-notification',
       action: 'started',
       streamId,
@@ -1041,10 +1100,16 @@ export class WSServer extends EventEmitter {
       timestamp: Date.now()
     };
     
+    console.log('[Stream Start] Broadcasting notifications');
+    
     // Send to all connected clients
     for (const [clientId, otherClient] of this.clients) {
-      if (clientId !== client.id) {
+      if (otherClient.ws.readyState === 1) {
+        // Send both formats
         otherClient.ws.send(JSON.stringify(notification));
+        if (clientId !== client.id) {
+          otherClient.ws.send(JSON.stringify(legacyNotification));
+        }
       }
     }
   }
@@ -1087,8 +1152,15 @@ export class WSServer extends EventEmitter {
       timestamp: Date.now()
     }));
     
-    // Broadcast to all clients
+    // Broadcast to all clients - using test-webRTC format
     const notification = {
+      type: 'stream-end',
+      streamId: streamId,
+      streamer: streamInfo.streamer
+    };
+    
+    // Also send legacy format for compatibility
+    const legacyNotification = {
       type: 'stream-notification',
       action: 'ended',
       streamId,
@@ -1100,12 +1172,20 @@ export class WSServer extends EventEmitter {
       timestamp: Date.now()
     };
     
+    console.log('[Stream End] Broadcasting notifications');
+    
     // Send to all connected clients
     for (const [clientId, otherClient] of this.clients) {
-      if (clientId !== client.id) {
+      if (otherClient.ws.readyState === 1) {
+        // Send both formats
         otherClient.ws.send(JSON.stringify(notification));
+        if (clientId !== client.id) {
+          otherClient.ws.send(JSON.stringify(legacyNotification));
+        }
       }
     }
+    
+    console.log(`[Stream End] Stream ${streamId} ended`);
   }
 
   async handleViewerJoin(client, data) {
@@ -1355,17 +1435,23 @@ export class WSServer extends EventEmitter {
   findWebSocketByAddress(addressOrId) {
     if (!addressOrId) return null;
     
-    // First try to find by address (for authenticated users)
-    for (const [clientId, client] of this.clients) {
-      if (client.address && client.address.toLowerCase() === addressOrId.toLowerCase()) {
-        return client;
-      }
+    // First try to find by address using the mapping
+    const clientId = this.addressToClientId.get(addressOrId);
+    if (clientId) {
+      return this.clients.get(clientId);
     }
     
-    // If not found by address, try by client ID
+    // If not found by address, try by client ID directly
     const clientById = this.clients.get(addressOrId);
     if (clientById) {
       return clientById;
+    }
+    
+    // Fallback: search all clients (for backwards compatibility)
+    for (const [id, client] of this.clients) {
+      if (client.address && client.address.toLowerCase() === addressOrId.toLowerCase()) {
+        return client;
+      }
     }
     
     return null;
@@ -1374,18 +1460,28 @@ export class WSServer extends EventEmitter {
   // WebRTC signaling handlers
   async handleWebRTCRequest(client, data) {
     // Viewer requests offer from broadcaster
+    console.log('[WebRTC Request]', {
+      from: client.address || client.id,
+      to: data.to,
+      action: data.action,
+      streamId: data.streamId
+    });
+    
     if (data.action === 'request-offer' && data.to) {
       // Forward request to broadcaster
       const targetClient = this.findWebSocketByAddress(data.to);
       if (targetClient && targetClient.ws.readyState === 1) {
-        targetClient.ws.send(JSON.stringify({
+        const message = {
           type: 'webrtc-request',
           action: 'request-offer',
           streamId: data.streamId,
           from: data.from || client.address,
           clientId: client.id
-        }));
+        };
+        console.log('[WebRTC Request] Forwarding to broadcaster:', message);
+        targetClient.ws.send(JSON.stringify(message));
       } else {
+        console.log('[WebRTC Request] Broadcaster not found:', data.to);
         client.ws.send(JSON.stringify({
           type: 'error',
           message: 'Broadcaster not found'
@@ -1622,7 +1718,137 @@ export class WSServer extends EventEmitter {
     // Associate Ethereum address with client
     if (data.address) {
       client.address = data.address;
+      this.addressToClientId.set(data.address, client.id);
       console.log(`Client ${client.id} registered with address ${data.address}`);
+    }
+  }
+
+  async handleJoin(client, data) {
+    // Handle room join
+    if (data.room && data.userId) {
+      client.room = data.room;
+      client.userId = data.userId;
+      console.log(`User ${data.userId} joined room ${data.room}`);
+      
+      // Notify other users in room
+      const roomMembers = [];
+      for (const [otherClientId, otherClient] of this.clients) {
+        if (otherClient.room === data.room && otherClientId !== client.id) {
+          roomMembers.push(otherClient.userId);
+          otherClient.ws.send(JSON.stringify({
+            type: 'user-joined',
+            userId: data.userId
+          }));
+        }
+      }
+      
+      // Send current room members to new user
+      client.ws.send(JSON.stringify({
+        type: 'room-members',
+        members: roomMembers
+      }));
+    }
+  }
+
+  async handleLeave(client, data) {
+    // Handle user leaving room
+    if (client.room && client.userId) {
+      for (const [otherClientId, otherClient] of this.clients) {
+        if (otherClient.room === client.room && otherClientId !== client.id) {
+          otherClient.ws.send(JSON.stringify({
+            type: 'user-left',
+            userId: client.userId
+          }));
+        }
+      }
+      client.room = null;
+      client.userId = null;
+    }
+  }
+
+  async handleRoomOffer(client, data) {
+    // Forward offer to all users in room
+    if (client.room && data.data) {
+      for (const [otherClientId, otherClient] of this.clients) {
+        if (otherClient.room === client.room && otherClientId !== client.id && otherClient.ws.readyState === 1) {
+          otherClient.ws.send(JSON.stringify({
+            type: 'offer',
+            data: data.data,
+            from: client.userId || client.id
+          }));
+        }
+      }
+    }
+  }
+
+  async handleRoomAnswer(client, data) {
+    // Forward answer to all users in room
+    if (client.room && data.data) {
+      for (const [otherClientId, otherClient] of this.clients) {
+        if (otherClient.room === client.room && otherClientId !== client.id && otherClient.ws.readyState === 1) {
+          otherClient.ws.send(JSON.stringify({
+            type: 'answer',
+            data: data.data,
+            from: client.userId || client.id
+          }));
+        }
+      }
+    }
+  }
+
+  async handleRoomIceCandidate(client, data) {
+    // Forward ICE candidate to all users in room
+    if (client.room && data.data) {
+      for (const [otherClientId, otherClient] of this.clients) {
+        if (otherClient.room === client.room && otherClientId !== client.id && otherClient.ws.readyState === 1) {
+          otherClient.ws.send(JSON.stringify({
+            type: 'ice-candidate',
+            data: data.data,
+            from: client.userId || client.id
+          }));
+        }
+      }
+    }
+  }
+
+  async handleTestRequestOffer(client, data) {
+    // Test version of offer request
+    if (data.to) {
+      // Forward test request to target
+      const targetClient = this.findWebSocketByAddress(data.to);
+      if (targetClient && targetClient.ws.readyState === 1) {
+        targetClient.ws.send(JSON.stringify({
+          type: 'test-request-offer',
+          streamId: data.streamId,
+          from: data.from || client.address,
+          clientId: client.id
+        }));
+      } else {
+        client.ws.send(JSON.stringify({
+          type: 'error',
+          message: 'Target not found'
+        }));
+      }
+    }
+  }
+
+  async handleEcho(client, data) {
+    // Testing endpoint - echo back
+    client.ws.send(JSON.stringify(data));
+  }
+
+  async handleBroadcastTest(client, data) {
+    // Testing endpoint - broadcast to all
+    const broadcastMessage = {
+      type: 'broadcast-test',
+      message: data.message,
+      from: client.id
+    };
+    
+    for (const [otherId, otherClient] of this.clients) {
+      if (otherClient.ws.readyState === 1) {
+        otherClient.ws.send(JSON.stringify(broadcastMessage));
+      }
     }
   }
 
