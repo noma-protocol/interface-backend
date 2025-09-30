@@ -6,6 +6,38 @@ import { UsernameStore } from './username-store.js';
 import { RateLimiter } from './rate-limiter.js';
 import { SessionManager } from './session-manager.js';
 
+// Stream Room class for managing viewers
+class StreamRoom {
+  constructor(streamId, broadcaster, broadcasterAddress) {
+    this.streamId = streamId;
+    this.broadcaster = broadcaster;
+    this.broadcasterAddress = broadcasterAddress;
+    this.viewers = new Map(); // Map of viewerId -> viewer info
+    this.createdAt = Date.now();
+  }
+
+  addViewer(viewerId, viewerInfo) {
+    this.viewers.set(viewerId, viewerInfo);
+  }
+
+  removeViewer(viewerId) {
+    this.viewers.delete(viewerId);
+  }
+
+  getViewerCount() {
+    return this.viewers.size;
+  }
+
+  broadcast(message, excludeId = null) {
+    // Send to all viewers except excluded one
+    for (const [viewerId, viewer] of this.viewers) {
+      if (viewerId !== excludeId && viewer.ws && viewer.ws.readyState === 1) {
+        viewer.ws.send(JSON.stringify(message));
+      }
+    }
+  }
+}
+
 // Helper function to convert BigInt to string in nested objects
 function bigIntReplacer(key, value) {
   if (typeof value === 'bigint') {
@@ -29,6 +61,8 @@ export class WSServer extends EventEmitter {
     this.rateLimiter = new RateLimiter();
     this.kickedUsers = new Map(); // Track kicked users
     this.sessionManager = new SessionManager(); // Persistent session management
+    this.activeStreams = new Map(); // Track active streams by streamId
+    this.streamRooms = new Map(); // Track stream rooms with viewers
     
     // Admin addresses (can be configured)
     this.adminAddresses = new Set([
@@ -123,15 +157,65 @@ export class WSServer extends EventEmitter {
 
       this.clients.set(clientId, client);
 
+      // Send connection confirmation
+      ws.send(JSON.stringify({
+        type: 'connection',
+        clientId: clientId,
+        message: 'Connected to streaming server'
+      }));
+
       ws.on('message', async (message) => {
         try {
           const data = JSON.parse(message.toString());
+          
+          // CRITICAL: Route messages with 'to' field directly, don't broadcast
+          if (data.to) {
+            // This is a directed message, route it to specific recipient
+            const targetClient = this.findWebSocketByAddress(data.to);
+            
+            if (targetClient) {
+              // Add sender information and forward
+              targetClient.ws.send(JSON.stringify({
+                ...data,
+                from: client.address || client.id
+              }));
+              
+              // Log successful routing for debugging
+              if (data.type && data.type.startsWith('webrtc')) {
+                console.log(`[ROUTED] ${data.type} from ${client.address || client.id} to ${data.to}`);
+              }
+              return; // Don't process further
+            } else {
+              console.log(`[ROUTING FAILED] Target not found: ${data.to}`);
+              console.log(`[ROUTING FAILED] Available addresses: ${Array.from(this.clients.values()).map(c => c.address).filter(Boolean).join(', ')}`);
+              console.log(`[ROUTING FAILED] Available client IDs: ${Array.from(this.clients.keys()).join(', ')}`);
+              
+              // Try to route by client ID if address failed
+              if (data.to.startsWith('client-')) {
+                const clientById = this.clients.get(data.to);
+                if (clientById) {
+                  clientById.ws.send(JSON.stringify({
+                    ...data,
+                    from: client.address || client.id
+                  }));
+                  console.log(`[ROUTED BY ID] ${data.type} from ${client.address || client.id} to ${data.to}`);
+                  return;
+                }
+              }
+              
+              // Continue to normal handling for fallback
+            }
+          }
+          
+          // Only process through normal handlers if no 'to' field or routing failed
           await this.handleMessage(clientId, data);
         } catch (error) {
           console.error('Error handling message:', error);
+          console.error('Raw message:', message.toString());
           ws.send(JSON.stringify({
             type: 'error',
-            message: 'Invalid message format'
+            message: 'Invalid message format',
+            details: error.message
           }));
         }
       });
@@ -147,6 +231,75 @@ export class WSServer extends EventEmitter {
       ws.on('close', () => {
         const clientInfo = this.clients.get(clientId);
         const wasAuthenticated = clientInfo ? clientInfo.authenticated : false;
+        
+        // Handle client leaving streams they joined
+        if (clientInfo && clientInfo.joinedStreams) {
+          for (const streamId of clientInfo.joinedStreams) {
+            // Remove from stream room
+            const room = this.streamRooms.get(streamId);
+            if (room) {
+              room.removeViewer(clientId);
+            }
+            
+            const streamInfo = this.activeStreams.get(streamId);
+            if (streamInfo) {
+              // Notify streamer that viewer left
+              const streamerClient = this.clients.get(streamInfo.clientId);
+              if (streamerClient) {
+                streamerClient.ws.send(JSON.stringify({
+                  type: 'stream-notification',
+                  action: 'viewer-left',
+                  streamId,
+                  viewer: clientInfo.address || 'anonymous',
+                  timestamp: Date.now()
+                }));
+              }
+              
+              // Notify other viewers
+              for (const [otherId, otherClient] of this.clients) {
+                if (otherId !== clientId && otherId !== streamInfo.clientId &&
+                    otherClient.joinedStreams && otherClient.joinedStreams.has(streamId)) {
+                  const leaverUsername = this.usernameStore.getUsername(clientInfo.address) || 'anonymous';
+                  otherClient.ws.send(JSON.stringify({
+                    type: 'stream-notification',
+                    action: 'user-left',
+                    streamId,
+                    user: clientInfo.address || 'anonymous',
+                    username: leaverUsername,
+                    timestamp: Date.now()
+                  }));
+                }
+              }
+            }
+          }
+        }
+        
+        // End any active streams for this client
+        for (const [streamId, streamInfo] of this.activeStreams) {
+          if (streamInfo.clientId === clientId) {
+            this.activeStreams.delete(streamId);
+            this.streamRooms.delete(streamId);
+            
+            // Notify all clients that the stream ended
+            const notification = {
+              type: 'stream-notification',
+              action: 'ended',
+              streamId,
+              streamer: streamInfo.streamer,
+              username: streamInfo.username,
+              title: streamInfo.title,
+              roomId: streamInfo.roomId,
+              message: `📴 ${streamInfo.username}'s stream ended unexpectedly`,
+              timestamp: Date.now()
+            };
+            
+            for (const [otherId, otherClient] of this.clients) {
+              if (otherId !== clientId) {
+                otherClient.ws.send(JSON.stringify(notification));
+              }
+            }
+          }
+        }
         
         // Remove client from map
         this.clients.delete(clientId);
@@ -195,9 +348,20 @@ export class WSServer extends EventEmitter {
     const client = this.clients.get(clientId);
     if (!client) return;
 
-    switch (data.type) {
+    // Log message handling for debugging
+    if (data.type && data.type.startsWith('webrtc')) {
+      console.log(`[WebRTC] Handling ${data.type} from ${client.address || clientId}`);
+      if (data.to) console.log(`[WebRTC] Target: ${data.to}`);
+    }
+
+    try {
+      switch (data.type) {
       case 'auth':
         await this.handleAuth(client, data);
+        break;
+
+      case 'register-address':
+        await this.handleRegisterAddress(client, data);
         break;
 
       case 'subscribe':
@@ -241,11 +405,86 @@ export class WSServer extends EventEmitter {
         await this.handleGetMessages(client, data);
         break;
 
+      case 'request-active-streams':
+        await this.handleRequestActiveStreams(client);
+        break;
+
+      case 'get-active-streams':
+        await this.handleGetActiveStreams(client);
+        break;
+
+      case 'stream-notification':
+        await this.handleStreamNotification(client, data);
+        break;
+
+      case 'stream-start':
+        await this.handleStreamStart(client, data);
+        break;
+
+      case 'stream-end':
+        await this.handleStreamEnd(client, data);
+        break;
+
+      case 'viewer-leave':
+        await this.handleViewerLeave(client, data);
+        break;
+
+      case 'viewer-join':
+        await this.handleViewerJoin(client, data);
+        break;
+
+      case 'direct-message':
+        // Direct messages should have been routed already if they had a 'to' field
+        // This handles the fallback case
+        await this.handleDirectMessage(client, data);
+        break;
+
+      case 'stream-joined':
+        await this.handleStreamJoined(client, data);
+        break;
+
+      // WebRTC signaling messages
+      case 'webrtc-request':
+        await this.handleWebRTCRequest(client, data);
+        break;
+        
+      case 'webrtc-offer':
+        await this.handleWebRTCOffer(client, data);
+        break;
+        
+      case 'webrtc-answer':
+        await this.handleWebRTCAnswer(client, data);
+        break;
+        
+      case 'webrtc-ice':
+        await this.handleWebRTCIce(client, data);
+        break;
+        
+      case 'request-active-streams':
+        await this.handleRequestActiveStreams(client);
+        break;
+
+      // Debug handler to test message routing
+      case 'debug-route':
+        await this.handleDebugRoute(client, data);
+        break;
+        
+      // Debug handler to list connected clients
+      case 'debug-clients':
+        await this.handleDebugClients(client);
+        break;
+
       default:
         client.ws.send(JSON.stringify({
           type: 'error',
           message: `Unknown message type: ${data.type}`
         }));
+      }
+    } catch (error) {
+      console.error('Error in handleMessage:', error);
+      console.error('Message type:', data.type);
+      console.error('Message data:', JSON.stringify(data));
+      throw error;
     }
   }
 
@@ -259,6 +498,17 @@ export class WSServer extends EventEmitter {
         client.authenticated = true;
         client.address = address;
         client.authTimestamp = Date.now();
+        
+        // Track connection by address for direct routing
+        if (address) {
+          // Remove any existing connection for this address
+          for (const [id, c] of this.clients) {
+            if (id !== client.id && c.address === address) {
+              console.log(`Removing duplicate connection for ${address}`);
+              c.ws.close(1000, 'Duplicate connection');
+            }
+          }
+        }
         
         // Get username
         const username = this.usernameStore.getUsername(address);
@@ -614,6 +864,766 @@ export class WSServer extends EventEmitter {
       type: 'messages',
       messages
     }));
+  }
+
+  async handleRequestActiveStreams(client) {
+    // Get all pools that have at least one subscriber
+    const allActivePools = new Set();
+    
+    for (const [clientId, otherClient] of this.clients) {
+      if (otherClient.pools && otherClient.pools.length > 0) {
+        otherClient.pools.forEach(pool => allActivePools.add(pool));
+      }
+    }
+    
+    // Get all active video streams with viewer count
+    const activeStreams = Array.from(this.activeStreams.values()).map(stream => {
+      const room = this.streamRooms.get(stream.streamId);
+      const viewerCount = room ? room.getViewerCount() : 0;
+      
+      return {
+        streamId: stream.streamId,
+        roomId: stream.roomId,
+        streamer: stream.streamer,
+        username: stream.username,
+        title: stream.title,
+        description: stream.description,
+        quality: stream.quality,
+        startedAt: stream.startedAt,
+        viewerCount,
+        clientId: stream.clientId,
+        isStreamerOnline: this.clients.has(stream.clientId)
+      };
+    });
+    
+    // Send pools, streams, and client's subscriptions
+    client.ws.send(JSON.stringify({
+      type: 'active-streams',
+      pools: Array.from(allActivePools), // All pools with active subscribers
+      mySubscriptions: client.pools || [], // This client's subscriptions
+      activeStreams: activeStreams // All active video streams
+    }));
+  }
+
+  async handleGetActiveStreams(client) {
+    // Get all pools that have at least one subscriber
+    const allActivePools = new Set();
+    
+    for (const [clientId, otherClient] of this.clients) {
+      if (otherClient.pools && otherClient.pools.length > 0) {
+        otherClient.pools.forEach(pool => allActivePools.add(pool));
+      }
+    }
+    
+    // Get all active video streams with viewer count
+    const activeStreams = Array.from(this.activeStreams.values()).map(stream => {
+      const room = this.streamRooms.get(stream.streamId);
+      const viewerCount = room ? room.getViewerCount() : 0;
+      
+      return {
+        streamId: stream.streamId,
+        roomId: stream.roomId,
+        streamer: stream.streamer,
+        username: stream.username,
+        title: stream.title,
+        description: stream.description,
+        quality: stream.quality,
+        startedAt: stream.startedAt,
+        viewerCount,
+        clientId: stream.clientId,
+        isStreamerOnline: this.clients.has(stream.clientId)
+      };
+    });
+    
+    // Send pools, streams, and client's subscriptions
+    client.ws.send(JSON.stringify({
+      type: 'active-streams',
+      pools: Array.from(allActivePools), // All pools with active subscribers
+      mySubscriptions: client.pools || [], // This client's subscriptions
+      activeStreams: activeStreams // All active video streams
+    }));
+  }
+
+  async handleStreamNotification(client, data) {
+    // Handle stream notification requests
+    // This could be used to notify about stream status changes or events
+    const { action, pool, roomId, message } = data;
+    
+    // Send acknowledgment back to the client
+    client.ws.send(JSON.stringify({
+      type: 'stream-notification-ack',
+      action,
+      pool,
+      message,
+      timestamp: Date.now()
+    }));
+    
+    // If this is a broadcast notification, send to all subscribed clients
+    if (action === 'broadcast' && (pool || roomId)) {
+      const targetPool = pool || roomId;
+      const notification = {
+        type: 'stream-notification',
+        pool: targetPool,
+        roomId,
+        message,
+        from: client.address || 'anonymous',
+        timestamp: Date.now()
+      };
+      
+      // Broadcast to all clients subscribed to this pool
+      for (const [clientId, otherClient] of this.clients) {
+        if (clientId !== client.id) {
+          // If targetPool exists and client has pool subscriptions, check if they're subscribed
+          if (targetPool && otherClient.pools && otherClient.pools.length > 0) {
+            if (otherClient.pools.includes(targetPool.toLowerCase())) {
+              otherClient.ws.send(JSON.stringify(notification));
+            }
+          } else {
+            // If no pool specified or client has no specific subscriptions, send to all
+            otherClient.ws.send(JSON.stringify(notification));
+          }
+        }
+      }
+    }
+  }
+
+  async handleStreamStart(client, data) {
+    // Handle when a user starts streaming
+    const { title, roomId, streamId: providedStreamId, pool, description, quality, streamer } = data;
+    // Use the streamer address from the message if client is not authenticated
+    const streamerAddress = client.address || streamer || data.from;
+    const username = this.usernameStore.getUsername(streamerAddress) || data.username || 'anonymous';
+    const streamId = providedStreamId || roomId || `${streamerAddress || client.id}_${Date.now()}`;
+    
+    // Store active stream
+    const streamInfo = {
+      streamId,
+      streamer: streamerAddress || client.id,
+      username,
+      title: title || 'Untitled Stream',
+      roomId: roomId || streamId,
+      pool,
+      description,
+      quality,
+      startedAt: data.startedAt || Date.now(),
+      clientId: client.id
+    };
+    this.activeStreams.set(streamId, streamInfo);
+    
+    // Create stream room
+    const room = new StreamRoom(streamId, client, streamerAddress);
+    this.streamRooms.set(streamId, room);
+    
+    // Create stream message
+    const message = `🎥 ${username} started streaming: "${title || 'Untitled Stream'}"`;
+    
+    // Send acknowledgment to the streamer
+    client.ws.send(JSON.stringify({
+      type: 'stream-start-ack',
+      streamId,
+      action: 'started',
+      message,
+      timestamp: Date.now()
+    }));
+    
+    // Broadcast to all clients
+    const notification = {
+      type: 'stream-notification',
+      action: 'started',
+      streamId,
+      roomId,
+      streamer: streamerAddress || 'anonymous',
+      username,
+      title,
+      description,
+      quality,
+      message,
+      timestamp: Date.now()
+    };
+    
+    // Send to all connected clients
+    for (const [clientId, otherClient] of this.clients) {
+      if (clientId !== client.id) {
+        otherClient.ws.send(JSON.stringify(notification));
+      }
+    }
+  }
+
+  async handleStreamEnd(client, data) {
+    // Handle when a user ends streaming
+    const { streamId } = data;
+    
+    const streamInfo = this.activeStreams.get(streamId);
+    if (!streamInfo) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream not found'
+      }));
+      return;
+    }
+    
+    // Check if client owns this stream
+    if (streamInfo.clientId !== client.id) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Unauthorized to end this stream'
+      }));
+      return;
+    }
+    
+    // Remove from active streams and rooms
+    this.activeStreams.delete(streamId);
+    this.streamRooms.delete(streamId);
+    
+    // Create end message
+    const message = `📴 ${streamInfo.username} ended streaming: "${streamInfo.title}"`;
+    
+    // Send acknowledgment to the streamer
+    client.ws.send(JSON.stringify({
+      type: 'stream-end-ack',
+      streamId,
+      action: 'ended',
+      message,
+      timestamp: Date.now()
+    }));
+    
+    // Broadcast to all clients
+    const notification = {
+      type: 'stream-notification',
+      action: 'ended',
+      streamId,
+      streamer: streamInfo.streamer,
+      username: streamInfo.username,
+      title: streamInfo.title,
+      roomId: streamInfo.roomId,
+      message,
+      timestamp: Date.now()
+    };
+    
+    // Send to all connected clients
+    for (const [clientId, otherClient] of this.clients) {
+      if (clientId !== client.id) {
+        otherClient.ws.send(JSON.stringify(notification));
+      }
+    }
+  }
+
+  async handleViewerJoin(client, data) {
+    // Handle when a viewer joins a stream
+    const { streamId, roomId } = data;
+    const targetStreamId = streamId || roomId;
+    
+    if (!targetStreamId) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream ID required'
+      }));
+      return;
+    }
+    
+    // Check if stream exists
+    const streamInfo = this.activeStreams.get(targetStreamId);
+    if (!streamInfo) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream not found'
+      }));
+      return;
+    }
+    
+    // Send stream info to the viewer
+    client.ws.send(JSON.stringify({
+      type: 'viewer-join-ack',
+      streamId: targetStreamId,
+      streamInfo: {
+        title: streamInfo.title,
+        streamer: streamInfo.streamer,
+        username: streamInfo.username,
+        description: streamInfo.description,
+        quality: streamInfo.quality,
+        startedAt: streamInfo.startedAt
+      },
+      timestamp: Date.now()
+    }));
+    
+    // Notify the streamer that a viewer joined
+    const streamerClient = this.clients.get(streamInfo.clientId);
+    if (streamerClient) {
+      const viewerUsername = this.usernameStore.getUsername(client.address) || 'anonymous';
+      streamerClient.ws.send(JSON.stringify({
+        type: 'stream-notification',
+        action: 'viewer-joined',
+        streamId: targetStreamId,
+        viewer: client.address || 'anonymous',
+        viewerUsername,
+        timestamp: Date.now()
+      }));
+    }
+  }
+
+  async handleViewerLeave(client, data) {
+    // Handle when a viewer leaves a stream
+    const { streamId, roomId } = data;
+    const targetStreamId = streamId || roomId;
+    
+    if (!targetStreamId) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream ID required'
+      }));
+      return;
+    }
+    
+    // Send acknowledgment to the viewer
+    client.ws.send(JSON.stringify({
+      type: 'viewer-leave-ack',
+      streamId: targetStreamId,
+      timestamp: Date.now()
+    }));
+    
+    // Optionally notify the streamer that a viewer left
+    const streamInfo = this.activeStreams.get(targetStreamId);
+    if (streamInfo) {
+      const streamerClient = this.clients.get(streamInfo.clientId);
+      if (streamerClient) {
+        streamerClient.ws.send(JSON.stringify({
+          type: 'stream-notification',
+          action: 'viewer-left',
+          streamId: targetStreamId,
+          viewer: client.address || 'anonymous',
+          timestamp: Date.now()
+        }));
+      }
+    }
+  }
+
+  async handleDirectMessage(client, data) {
+    // Handle direct messages between users
+    const { recipient, recipientAddress, message } = data;
+    
+    if (!message || !message.trim()) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Message content is required'
+      }));
+      return;
+    }
+    
+    // Find recipient by address or username
+    let recipientClient = null;
+    let recipientId = null;
+    
+    if (recipientAddress) {
+      // Find by address
+      for (const [id, c] of this.clients) {
+        if (c.address && c.address.toLowerCase() === recipientAddress.toLowerCase()) {
+          recipientClient = c;
+          recipientId = id;
+          break;
+        }
+      }
+    } else if (recipient) {
+      // Find by username
+      for (const [id, c] of this.clients) {
+        const username = this.usernameStore.getUsername(c.address);
+        if (username && username.toLowerCase() === recipient.toLowerCase()) {
+          recipientClient = c;
+          recipientId = id;
+          break;
+        }
+      }
+    }
+    
+    if (!recipientClient) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Recipient not found or offline'
+      }));
+      return;
+    }
+    
+    const senderUsername = this.usernameStore.getUsername(client.address) || 'anonymous';
+    const timestamp = Date.now();
+    
+    // Send message to recipient
+    recipientClient.ws.send(JSON.stringify({
+      type: 'direct-message',
+      from: client.address || 'anonymous',
+      fromUsername: senderUsername,
+      message: message.trim(),
+      timestamp
+    }));
+    
+    // Send acknowledgment to sender
+    client.ws.send(JSON.stringify({
+      type: 'direct-message-ack',
+      to: recipientClient.address || recipientId,
+      toUsername: this.usernameStore.getUsername(recipientClient.address) || recipient,
+      message: message.trim(),
+      timestamp
+    }));
+  }
+
+  async handleStreamJoined(client, data) {
+    // Handle when a user confirms they've joined a stream
+    // This is similar to viewer-join but might be used for different purposes
+    const { streamId, roomId } = data;
+    const targetStreamId = streamId || roomId;
+    
+    if (!targetStreamId) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream ID required'
+      }));
+      return;
+    }
+    
+    // Check if stream exists
+    const streamInfo = this.activeStreams.get(targetStreamId);
+    if (!streamInfo) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream not found'
+      }));
+      return;
+    }
+    
+    // Track that this client joined the stream
+    if (!client.joinedStreams) {
+      client.joinedStreams = new Set();
+    }
+    client.joinedStreams.add(targetStreamId);
+    
+    // Add to stream room
+    const room = this.streamRooms.get(targetStreamId);
+    if (room) {
+      room.addViewer(client.id, {
+        ws: client.ws,
+        address: client.address,
+        username: this.usernameStore.getUsername(client.address) || 'anonymous',
+        joinedAt: Date.now()
+      });
+    }
+    
+    // Send acknowledgment with stream details
+    client.ws.send(JSON.stringify({
+      type: 'stream-joined-ack',
+      streamId: targetStreamId,
+      streamInfo: {
+        title: streamInfo.title,
+        streamer: streamInfo.streamer,
+        username: streamInfo.username,
+        description: streamInfo.description,
+        quality: streamInfo.quality,
+        startedAt: streamInfo.startedAt
+      },
+      timestamp: Date.now()
+    }));
+    
+    // Notify streamer about the viewer
+    const streamerClient = this.clients.get(streamInfo.clientId);
+    if (streamerClient) {
+      const viewerUsername = this.usernameStore.getUsername(client.address) || 'anonymous';
+      streamerClient.ws.send(JSON.stringify({
+        type: 'stream-notification',
+        action: 'viewer-joined',
+        streamId: targetStreamId,
+        viewer: client.address || 'anonymous',
+        viewerUsername,
+        timestamp: Date.now()
+      }));
+    }
+    
+    // Broadcast to other viewers that someone joined
+    for (const [clientId, otherClient] of this.clients) {
+      if (clientId !== client.id && clientId !== streamInfo.clientId && 
+          otherClient.joinedStreams && otherClient.joinedStreams.has(targetStreamId)) {
+        const joinerUsername = this.usernameStore.getUsername(client.address) || 'anonymous';
+        otherClient.ws.send(JSON.stringify({
+          type: 'stream-notification',
+          action: 'user-joined',
+          streamId: targetStreamId,
+          user: client.address || 'anonymous',
+          username: joinerUsername,
+          timestamp: Date.now()
+        }));
+      }
+    }
+  }
+
+  // Helper function to find WebSocket by address or ID
+  findWebSocketByAddress(addressOrId) {
+    if (!addressOrId) return null;
+    
+    // First try to find by address (for authenticated users)
+    for (const [clientId, client] of this.clients) {
+      if (client.address && client.address.toLowerCase() === addressOrId.toLowerCase()) {
+        return client;
+      }
+    }
+    
+    // If not found by address, try by client ID
+    const clientById = this.clients.get(addressOrId);
+    if (clientById) {
+      return clientById;
+    }
+    
+    return null;
+  }
+
+  // WebRTC signaling handlers
+  async handleWebRTCRequest(client, data) {
+    // Viewer requests offer from broadcaster
+    if (data.action === 'request-offer' && data.to) {
+      // Forward request to broadcaster
+      const targetClient = this.findWebSocketByAddress(data.to);
+      if (targetClient && targetClient.ws.readyState === 1) {
+        targetClient.ws.send(JSON.stringify({
+          type: 'webrtc-request',
+          action: 'request-offer',
+          streamId: data.streamId,
+          from: data.from || client.address,
+          clientId: client.id
+        }));
+      } else {
+        client.ws.send(JSON.stringify({
+          type: 'error',
+          message: 'Broadcaster not found'
+        }));
+      }
+    }
+  }
+  
+  // Fallback: Broadcast WebRTC messages to all clients in the same stream room
+  async broadcastWebRTCMessage(client, data) {
+    const { streamId, roomId, to } = data;
+    const targetStreamId = streamId || roomId;
+    
+    console.log(`[broadcastWebRTCMessage] Fallback broadcast for ${data.type} from ${client.address || client.id}`);
+    console.log(`[broadcastWebRTCMessage] Target: ${to}, StreamID: ${targetStreamId}`);
+    
+    if (!targetStreamId) {
+      console.log(`[broadcastWebRTCMessage] No stream ID, cannot broadcast`);
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'WebRTC routing failed: No stream ID provided',
+        originalType: data.type
+      }));
+      return;
+    }
+    
+    // Get stream info
+    const streamInfo = this.activeStreams.get(targetStreamId);
+    const room = this.streamRooms.get(targetStreamId);
+    
+    if (!streamInfo && !room) {
+      console.log(`[broadcastWebRTCMessage] Stream not found: ${targetStreamId}`);
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'WebRTC routing failed: Stream not found',
+        originalType: data.type
+      }));
+      return;
+    }
+    
+    let messagesSent = 0;
+    
+    // Broadcast to all clients in the stream room
+    if (room) {
+      // Send to broadcaster
+      if (streamInfo && streamInfo.clientId !== client.id) {
+        const broadcaster = this.clients.get(streamInfo.clientId);
+        if (broadcaster) {
+          broadcaster.ws.send(JSON.stringify({
+            ...data,
+            from: client.address || client.id
+          }));
+          messagesSent++;
+          console.log(`[broadcastWebRTCMessage] Sent to broadcaster: ${streamInfo.streamer}`);
+        }
+      }
+      
+      // Send to all viewers
+      room.broadcast({
+        ...data,
+        from: client.address || client.id
+      }, client.id);
+      messagesSent += room.viewers.size;
+    }
+    
+    // Also try direct stream participants
+    if (streamInfo) {
+      // Send to all clients who joined this stream
+      for (const [clientId, otherClient] of this.clients) {
+        if (clientId !== client.id && 
+            otherClient.joinedStreams && 
+            otherClient.joinedStreams.has(targetStreamId) &&
+            !room?.viewers.has(clientId)) {
+          otherClient.ws.send(JSON.stringify({
+            ...data,
+            from: client.address || client.id
+          }));
+          messagesSent++;
+        }
+      }
+    }
+    
+    console.log(`[broadcastWebRTCMessage] Broadcasted to ${messagesSent} clients`);
+  }
+
+  async handleWebRTCOffer(client, data) {
+    // Broadcaster sends offer to viewer
+    if (data.to) {
+      const targetClient = this.clients.get(data.to);
+      if (targetClient && targetClient.ws.readyState === 1) {
+        targetClient.ws.send(JSON.stringify({
+          type: 'webrtc-offer',
+          streamId: data.streamId,
+          from: data.from || client.address,
+          offer: data.offer
+        }));
+      } else {
+        // Try sending by address if clientId failed
+        const targetByAddress = this.findWebSocketByAddress(data.to);
+        if (targetByAddress) {
+          targetByAddress.ws.send(JSON.stringify({
+            type: 'webrtc-offer',
+            streamId: data.streamId,
+            from: data.from || client.address,
+            offer: data.offer
+          }));
+        }
+      }
+    }
+  }
+
+  async handleWebRTCAnswer(client, data) {
+    // Viewer sends answer to broadcaster
+    if (data.to) {
+      const targetClient = this.findWebSocketByAddress(data.to);
+      if (targetClient) {
+        targetClient.ws.send(JSON.stringify({
+          type: 'webrtc-answer',
+          streamId: data.streamId,
+          from: client.id,
+          answer: data.answer
+        }));
+      } else {
+        // Try sending by clientId
+        const targetById = this.clients.get(data.to);
+        if (targetById && targetById.ws.readyState === 1) {
+          targetById.ws.send(JSON.stringify({
+            type: 'webrtc-answer',
+            streamId: data.streamId,
+            from: client.id,
+            answer: data.answer
+          }));
+        }
+      }
+    }
+  }
+
+  async handleWebRTCIce(client, data) {
+    // Exchange ICE candidates
+    if (data.to) {
+      // Try both clientId and address
+      const targetClient = this.clients.get(data.to);
+      const targetByAddress = this.findWebSocketByAddress(data.to);
+      
+      const sent = (targetClient && targetClient.ws.readyState === 1) || (targetByAddress && targetByAddress.ws.readyState === 1);
+      
+      if (targetClient && targetClient.ws.readyState === 1) {
+        targetClient.ws.send(JSON.stringify({
+          type: 'webrtc-ice',
+          streamId: data.streamId,
+          from: data.from || client.id,
+          candidate: data.candidate
+        }));
+      } else if (targetByAddress && targetByAddress.ws.readyState === 1) {
+        targetByAddress.ws.send(JSON.stringify({
+          type: 'webrtc-ice',
+          streamId: data.streamId,
+          from: data.from || client.id,
+          candidate: data.candidate
+        }));
+      }
+      
+      if (!sent) {
+        console.warn(`Failed to send ICE candidate to ${data.to}`);
+      }
+    }
+  }
+
+  // Debug handler to test message routing
+  async handleDebugRoute(client, data) {
+    const { to, message } = data;
+    
+    console.log(`Debug route from ${client.address || client.id} to ${to}`);
+    console.log(`Connected clients:`, Array.from(this.clients.entries()).map(([id, c]) => ({
+      id,
+      address: c.address,
+      authenticated: c.authenticated
+    })));
+    
+    if (to) {
+      const target = this.findWebSocketByAddress(to);
+      if (target) {
+        target.ws.send(JSON.stringify({
+          type: 'debug-message',
+          from: client.address || client.id,
+          message: message || 'Debug test',
+          timestamp: Date.now()
+        }));
+        
+        client.ws.send(JSON.stringify({
+          type: 'debug-route-ack',
+          success: true,
+          sentTo: to
+        }));
+      } else {
+        client.ws.send(JSON.stringify({
+          type: 'debug-route-ack',
+          success: false,
+          error: 'Target not found',
+          availableClients: Array.from(this.clients.values()).map(c => c.address).filter(Boolean)
+        }));
+      }
+    }
+  }
+  
+  // Debug handler to list all connected clients
+  async handleDebugClients(client) {
+    const clientsList = Array.from(this.clients.entries()).map(([id, c]) => ({
+      id,
+      address: c.address,
+      authenticated: c.authenticated,
+      joinedStreams: c.joinedStreams ? Array.from(c.joinedStreams) : [],
+      isStreaming: Array.from(this.activeStreams.values()).some(s => s.clientId === id)
+    }));
+    
+    client.ws.send(JSON.stringify({
+      type: 'debug-clients',
+      clients: clientsList,
+      totalCount: this.clients.size,
+      authenticatedCount: clientsList.filter(c => c.authenticated).length
+    }));
+  }
+
+  async handleRequestActiveStreams(client) {
+    // Send list of active streams
+    const streamsList = Array.from(this.activeStreams.values());
+    client.ws.send(JSON.stringify({
+      type: 'active-streams',
+      activeStreams: streamsList
+    }));
+  }
+
+  async handleRegisterAddress(client, data) {
+    // Associate Ethereum address with client
+    if (data.address) {
+      client.address = data.address;
+      console.log(`Client ${client.id} registered with address ${data.address}`);
+    }
   }
 
   async handleCheckAuth(client, data) {
