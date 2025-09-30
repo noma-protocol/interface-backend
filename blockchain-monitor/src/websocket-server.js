@@ -323,6 +323,11 @@ export class WSServer extends EventEmitter {
       if (data.to) console.log(`[WebRTC] Target: ${data.to}`);
     }
 
+    // Log stream-related messages
+    if (data.type && (data.type.includes('stream') || data.type === 'register-address')) {
+      console.log(`[Message] ${data.type} from ${client.address || clientId}`, data);
+    }
+
     try {
       switch (data.type) {
       case 'auth':
