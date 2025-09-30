@@ -41,6 +41,7 @@ export class UsernameStore {
   }
 
   getUsername(address) {
+    if (!address) return null;
     const lowercaseAddress = address.toLowerCase();
     const entry = this.usernames.get(lowercaseAddress);
     return entry ? entry.username : this.generateDefaultUsername(address);
