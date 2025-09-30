@@ -426,6 +426,10 @@ export class WSServer extends EventEmitter {
         await this.handleStreamEnd(client, data);
         break;
 
+      case 'stream-update':
+        await this.handleStreamUpdate(client, data);
+        break;
+
       case 'viewer-leave':
         await this.handleViewerLeave(client, data);
         break;
@@ -1176,6 +1180,78 @@ export class WSServer extends EventEmitter {
     }
     
     console.log(`[Stream End] Stream ${streamId} ended`);
+  }
+
+  async handleStreamUpdate(client, data) {
+    // Handle when a streamer updates stream metadata
+    const { streamId, title, description, quality } = data;
+
+    if (!streamId) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream ID required'
+      }));
+      return;
+    }
+
+    const streamInfo = this.activeStreams.get(streamId);
+    if (!streamInfo) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream not found'
+      }));
+      return;
+    }
+
+    // Check if client owns this stream
+    if (streamInfo.clientId !== client.id) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Unauthorized to update this stream'
+      }));
+      return;
+    }
+
+    // Update stream info with new metadata (only update provided fields)
+    if (title !== undefined) streamInfo.title = title;
+    if (description !== undefined) streamInfo.description = description;
+    if (quality !== undefined) streamInfo.quality = quality;
+
+    // Save updated stream info
+    this.activeStreams.set(streamId, streamInfo);
+
+    // Send acknowledgment to the streamer
+    client.ws.send(JSON.stringify({
+      type: 'stream-update-ack',
+      streamId,
+      title: streamInfo.title,
+      description: streamInfo.description,
+      quality: streamInfo.quality,
+      timestamp: Date.now()
+    }));
+
+    // Broadcast update to all viewers and other clients
+    const notification = {
+      type: 'stream-update',
+      streamId,
+      title: streamInfo.title,
+      description: streamInfo.description,
+      quality: streamInfo.quality,
+      streamer: streamInfo.streamer,
+      username: streamInfo.username,
+      timestamp: Date.now()
+    };
+
+    console.log(`[Stream Update] Broadcasting updates for stream ${streamId}`);
+
+    // Send to all connected clients
+    for (const [clientId, otherClient] of this.clients) {
+      if (clientId !== client.id && otherClient.ws.readyState === 1) {
+        otherClient.ws.send(JSON.stringify(notification));
+      }
+    }
+
+    console.log(`[Stream Update] Stream ${streamId} updated: title="${streamInfo.title}", quality=${streamInfo.quality}`);
   }
 
   async handleViewerJoin(client, data) {
