@@ -1173,7 +1173,7 @@ export class WSServer extends EventEmitter {
     // Handle when a viewer joins a stream
     const { streamId, roomId } = data;
     const targetStreamId = streamId || roomId;
-    
+
     if (!targetStreamId) {
       client.ws.send(JSON.stringify({
         type: 'error',
@@ -1181,7 +1181,7 @@ export class WSServer extends EventEmitter {
       }));
       return;
     }
-    
+
     // Check if stream exists
     const streamInfo = this.activeStreams.get(targetStreamId);
     if (!streamInfo) {
@@ -1191,7 +1191,24 @@ export class WSServer extends EventEmitter {
       }));
       return;
     }
-    
+
+    // Track that this client joined the stream
+    if (!client.joinedStreams) {
+      client.joinedStreams = new Set();
+    }
+    client.joinedStreams.add(targetStreamId);
+
+    // Add to stream room for viewer count tracking
+    const room = this.streamRooms.get(targetStreamId);
+    if (room) {
+      room.addViewer(client.id, {
+        ws: client.ws,
+        address: client.address,
+        username: this.usernameStore.getUsername(client.address) || 'anonymous',
+        joinedAt: Date.now()
+      });
+    }
+
     // Send stream info to the viewer
     client.ws.send(JSON.stringify({
       type: 'viewer-join-ack',
@@ -1206,7 +1223,7 @@ export class WSServer extends EventEmitter {
       },
       timestamp: Date.now()
     }));
-    
+
     // Notify the streamer that a viewer joined
     const streamerClient = this.clients.get(streamInfo.clientId);
     if (streamerClient) {
@@ -1226,7 +1243,7 @@ export class WSServer extends EventEmitter {
     // Handle when a viewer leaves a stream
     const { streamId, roomId } = data;
     const targetStreamId = streamId || roomId;
-    
+
     if (!targetStreamId) {
       client.ws.send(JSON.stringify({
         type: 'error',
@@ -1234,15 +1251,26 @@ export class WSServer extends EventEmitter {
       }));
       return;
     }
-    
+
+    // Remove from joined streams tracking
+    if (client.joinedStreams) {
+      client.joinedStreams.delete(targetStreamId);
+    }
+
+    // Remove from stream room for viewer count tracking
+    const room = this.streamRooms.get(targetStreamId);
+    if (room) {
+      room.removeViewer(client.id);
+    }
+
     // Send acknowledgment to the viewer
     client.ws.send(JSON.stringify({
       type: 'viewer-leave-ack',
       streamId: targetStreamId,
       timestamp: Date.now()
     }));
-    
-    // Optionally notify the streamer that a viewer left
+
+    // Notify the streamer that a viewer left
     const streamInfo = this.activeStreams.get(targetStreamId);
     if (streamInfo) {
       const streamerClient = this.clients.get(streamInfo.clientId);
