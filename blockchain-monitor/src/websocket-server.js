@@ -64,7 +64,8 @@ export class WSServer extends EventEmitter {
     this.sessionManager = new SessionManager(); // Persistent session management
     this.activeStreams = new Map(); // Track active streams by streamId
     this.streamRooms = new Map(); // Track stream rooms with viewers
-    
+    this.pendingIceCandidates = new Map(); // Buffer ICE candidates until offer/answer exchange: connectionKey -> [candidates]
+
     // Admin addresses (can be configured)
     this.adminAddresses = new Set([
       // Add admin addresses here
@@ -168,47 +169,8 @@ export class WSServer extends EventEmitter {
       ws.on('message', async (message) => {
         try {
           const data = JSON.parse(message.toString());
-          
-          // CRITICAL: Route messages with 'to' field directly, don't broadcast
-          if (data.to) {
-            // This is a directed message, route it to specific recipient
-            const targetClient = this.findWebSocketByAddress(data.to);
-            
-            if (targetClient) {
-              // Add sender information and forward
-              targetClient.ws.send(JSON.stringify({
-                ...data,
-                from: client.address || client.id
-              }));
-              
-              // Log successful routing for debugging
-              if (data.type && data.type.startsWith('webrtc')) {
-                console.log(`[ROUTED] ${data.type} from ${client.address || client.id} to ${data.to}`);
-              }
-              return; // Don't process further
-            } else {
-              console.log(`[ROUTING FAILED] Target not found: ${data.to}`);
-              console.log(`[ROUTING FAILED] Available addresses: ${Array.from(this.clients.values()).map(c => c.address).filter(Boolean).join(', ')}`);
-              console.log(`[ROUTING FAILED] Available client IDs: ${Array.from(this.clients.keys()).join(', ')}`);
-              
-              // Try to route by client ID if address failed
-              if (data.to.startsWith('client-')) {
-                const clientById = this.clients.get(data.to);
-                if (clientById) {
-                  clientById.ws.send(JSON.stringify({
-                    ...data,
-                    from: client.address || client.id
-                  }));
-                  console.log(`[ROUTED BY ID] ${data.type} from ${client.address || client.id} to ${data.to}`);
-                  return;
-                }
-              }
-              
-              // Continue to normal handling for fallback
-            }
-          }
-          
-          // Only process through normal handlers if no 'to' field or routing failed
+
+          // All messages go through handlers - handlers will do their own routing
           await this.handleMessage(clientId, data);
         } catch (error) {
           console.error('Error handling message:', error);
@@ -1457,6 +1419,45 @@ export class WSServer extends EventEmitter {
     return null;
   }
 
+  // Helper methods for ICE candidate buffering
+  getConnectionKey(to, from, streamId) {
+    // Create a unique key for each peer connection
+    // Normalize addresses to handle both directions
+    const normalized = [to, from].sort().join(':');
+    return `${normalized}:${streamId || 'default'}`;
+  }
+
+  shouldBufferIceCandidate(connectionKey) {
+    // Check if we've already processed offer/answer for this connection
+    // If the connection key exists in pendingIceCandidates, it means we're still buffering
+    // If it doesn't exist yet, we should start buffering
+    // If it exists but is null, offer/answer was already exchanged
+    return !this.pendingIceCandidates.has(connectionKey) ||
+           this.pendingIceCandidates.get(connectionKey) !== null;
+  }
+
+  flushPendingIceCandidates(to, from, streamId) {
+    const connectionKey = this.getConnectionKey(to, from, streamId);
+    const bufferedCandidates = this.pendingIceCandidates.get(connectionKey);
+
+    if (bufferedCandidates && bufferedCandidates.length > 0) {
+      console.log(`[ICE Buffer] Flushing ${bufferedCandidates.length} buffered candidates for ${connectionKey}`);
+
+      // Find target client
+      const targetClient = this.clients.get(to) || this.findWebSocketByAddress(to);
+
+      if (targetClient && targetClient.ws.readyState === 1) {
+        // Send all buffered candidates
+        bufferedCandidates.forEach(candidate => {
+          targetClient.ws.send(JSON.stringify(candidate));
+        });
+      }
+    }
+
+    // Mark this connection as having exchanged offer/answer by setting to null
+    this.pendingIceCandidates.set(connectionKey, null);
+  }
+
   // WebRTC signaling handlers
   async handleWebRTCRequest(client, data) {
     // Viewer requests offer from broadcaster
@@ -1489,106 +1490,39 @@ export class WSServer extends EventEmitter {
       }
     }
   }
-  
-  // Fallback: Broadcast WebRTC messages to all clients in the same stream room
-  async broadcastWebRTCMessage(client, data) {
-    const { streamId, roomId, to } = data;
-    const targetStreamId = streamId || roomId;
-    
-    console.log(`[broadcastWebRTCMessage] Fallback broadcast for ${data.type} from ${client.address || client.id}`);
-    console.log(`[broadcastWebRTCMessage] Target: ${to}, StreamID: ${targetStreamId}`);
-    
-    if (!targetStreamId) {
-      console.log(`[broadcastWebRTCMessage] No stream ID, cannot broadcast`);
-      client.ws.send(JSON.stringify({
-        type: 'error',
-        message: 'WebRTC routing failed: No stream ID provided',
-        originalType: data.type
-      }));
-      return;
-    }
-    
-    // Get stream info
-    const streamInfo = this.activeStreams.get(targetStreamId);
-    const room = this.streamRooms.get(targetStreamId);
-    
-    if (!streamInfo && !room) {
-      console.log(`[broadcastWebRTCMessage] Stream not found: ${targetStreamId}`);
-      client.ws.send(JSON.stringify({
-        type: 'error',
-        message: 'WebRTC routing failed: Stream not found',
-        originalType: data.type
-      }));
-      return;
-    }
-    
-    let messagesSent = 0;
-    
-    // Broadcast to all clients in the stream room
-    if (room) {
-      // Send to broadcaster
-      if (streamInfo && streamInfo.clientId !== client.id) {
-        const broadcaster = this.clients.get(streamInfo.clientId);
-        if (broadcaster) {
-          broadcaster.ws.send(JSON.stringify({
-            ...data,
-            from: client.address || client.id
-          }));
-          messagesSent++;
-          console.log(`[broadcastWebRTCMessage] Sent to broadcaster: ${streamInfo.streamer}`);
-        }
-      }
-      
-      // Send to all viewers
-      room.broadcast({
-        ...data,
-        from: client.address || client.id
-      }, client.id);
-      messagesSent += room.viewers.size;
-    }
-    
-    // Also try direct stream participants
-    if (streamInfo) {
-      // Send to all clients who joined this stream
-      for (const [clientId, otherClient] of this.clients) {
-        if (clientId !== client.id && 
-            otherClient.joinedStreams && 
-            otherClient.joinedStreams.has(targetStreamId) &&
-            !room?.viewers.has(clientId)) {
-          otherClient.ws.send(JSON.stringify({
-            ...data,
-            from: client.address || client.id
-          }));
-          messagesSent++;
-        }
-      }
-    }
-    
-    console.log(`[broadcastWebRTCMessage] Broadcasted to ${messagesSent} clients`);
-  }
 
   async handleWebRTCOffer(client, data) {
     // Broadcaster sends offer to viewer
     if (data.to) {
-      const targetClient = this.clients.get(data.to);
+      const from = data.from || client.address || client.id;
+
+      // Try by clientId first
+      let targetClient = this.clients.get(data.to);
       if (targetClient && targetClient.ws.readyState === 1) {
         targetClient.ws.send(JSON.stringify({
           type: 'webrtc-offer',
           streamId: data.streamId,
-          from: data.from || client.address,
+          from: from,
           offer: data.offer
         }));
-      } else {
-        // Try sending by address if clientId failed
-        const targetByAddress = this.findWebSocketByAddress(data.to);
-        if (targetByAddress) {
-          targetByAddress.ws.send(JSON.stringify({
-            type: 'webrtc-offer',
-            streamId: data.streamId,
-            from: data.from || client.address,
-            offer: data.offer
-          }));
-        }
+
+        // Flush any buffered ICE candidates for this connection
+        this.flushPendingIceCandidates(data.to, from, data.streamId);
+        return;
+      }
+
+      // Try sending by address if clientId failed
+      const targetByAddress = this.findWebSocketByAddress(data.to);
+      if (targetByAddress && targetByAddress.ws.readyState === 1) {
+        targetByAddress.ws.send(JSON.stringify({
+          type: 'webrtc-offer',
+          streamId: data.streamId,
+          from: from,
+          offer: data.offer
+        }));
+
+        // Flush any buffered ICE candidates for this connection
+        this.flushPendingIceCandidates(data.to, from, data.streamId);
       }
     }
   }
@@ -1596,25 +1530,35 @@ export class WSServer extends EventEmitter {
   async handleWebRTCAnswer(client, data) {
     // Viewer sends answer to broadcaster
     if (data.to) {
-      const targetClient = this.findWebSocketByAddress(data.to);
-      if (targetClient) {
+      const from = client.address || client.id;
+
+      // Try by address first
+      let targetClient = this.findWebSocketByAddress(data.to);
+      if (targetClient && targetClient.ws.readyState === 1) {
         targetClient.ws.send(JSON.stringify({
           type: 'webrtc-answer',
           streamId: data.streamId,
-          from: client.id,
+          from: from,
           answer: data.answer
         }));
-      } else {
-        // Try sending by clientId
-        const targetById = this.clients.get(data.to);
-        if (targetById && targetById.ws.readyState === 1) {
-          targetById.ws.send(JSON.stringify({
-            type: 'webrtc-answer',
-            streamId: data.streamId,
-            from: client.id,
-            answer: data.answer
-          }));
-        }
+
+        // Flush any buffered ICE candidates for this connection
+        this.flushPendingIceCandidates(data.to, from, data.streamId);
+        return;
+      }
+
+      // Try sending by clientId if address failed
+      const targetById = this.clients.get(data.to);
+      if (targetById && targetById.ws.readyState === 1) {
+        targetById.ws.send(JSON.stringify({
+          type: 'webrtc-answer',
+          streamId: data.streamId,
+          from: from,
+          answer: data.answer
+        }));
+
+        // Flush any buffered ICE candidates for this connection
+        this.flushPendingIceCandidates(data.to, from, data.streamId);
       }
     }
   }
@@ -1622,31 +1566,43 @@ export class WSServer extends EventEmitter {
   async handleWebRTCIce(client, data) {
     // Exchange ICE candidates
     if (data.to) {
+      const from = data.from || client.address || client.id;
+      const connectionKey = this.getConnectionKey(data.to, from, data.streamId);
+
       // Try both clientId and address
       const targetClient = this.clients.get(data.to);
       const targetByAddress = this.findWebSocketByAddress(data.to);
-      
-      const sent = (targetClient && targetClient.ws.readyState === 1) || (targetByAddress && targetByAddress.ws.readyState === 1);
-      
-      if (targetClient && targetClient.ws.readyState === 1) {
-        targetClient.ws.send(JSON.stringify({
-          type: 'webrtc-ice',
-          streamId: data.streamId,
-          from: data.from || client.id,
-          candidate: data.candidate
-        }));
-      } else if (targetByAddress && targetByAddress.ws.readyState === 1) {
-        targetByAddress.ws.send(JSON.stringify({
-          type: 'webrtc-ice',
-          streamId: data.streamId,
-          from: data.from || client.id,
-          candidate: data.candidate
-        }));
+      const target = (targetClient && targetClient.ws.readyState === 1) ? targetClient :
+                     (targetByAddress && targetByAddress.ws.readyState === 1) ? targetByAddress : null;
+
+      if (target) {
+        // Check if we should buffer this ICE candidate (offer/answer not yet exchanged)
+        if (this.shouldBufferIceCandidate(connectionKey)) {
+          // Buffer the candidate
+          if (!this.pendingIceCandidates.has(connectionKey)) {
+            this.pendingIceCandidates.set(connectionKey, []);
+          }
+          this.pendingIceCandidates.get(connectionKey).push({
+            type: 'webrtc-ice',
+            streamId: data.streamId,
+            from: from,
+            candidate: data.candidate
+          });
+          console.log(`[ICE Buffer] Buffered candidate for ${connectionKey}, total: ${this.pendingIceCandidates.get(connectionKey).length}`);
+        } else {
+          // Send immediately - offer/answer already exchanged
+          target.ws.send(JSON.stringify({
+            type: 'webrtc-ice',
+            streamId: data.streamId,
+            from: from,
+            candidate: data.candidate
+          }));
+        }
+        return;
       }
-      
-      if (!sent) {
-        console.warn(`Failed to send ICE candidate to ${data.to}`);
-      }
+
+      // If target not found, log warning
+      console.warn(`Failed to send ICE candidate to ${data.to}`);
     }
   }
 
