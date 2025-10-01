@@ -1314,12 +1314,16 @@ export class WSServer extends EventEmitter {
     // Get the room for this stream
     const room = this.streamRooms.get(targetStreamId);
     if (!room) {
+      console.error(`[Stream Emoji] Room not found for stream ${targetStreamId}`);
       client.ws.send(JSON.stringify({
         type: 'error',
         message: 'Stream room not found'
       }));
       return;
     }
+
+    console.log(`[Stream Emoji] Room found with ${room.viewers.size} viewers`);
+    console.log(`[Stream Emoji] Room viewer IDs:`, Array.from(room.viewers.keys()));
 
     // Add sender info to emoji data if not present
     const enrichedEmojiData = {
@@ -1338,6 +1342,7 @@ export class WSServer extends EventEmitter {
     };
 
     console.log(`[Stream Emoji] ${enrichedEmojiData.senderUsername} sent ${enrichedEmojiData.emoji} to stream ${targetStreamId}`);
+    console.log(`[Stream Emoji] Streamer client ID: ${streamInfo.clientId}`);
 
     let sentCount = 0;
 
@@ -1374,7 +1379,13 @@ export class WSServer extends EventEmitter {
       }
     }
 
-    console.log(`[Stream Emoji] Broadcast to ${sentCount} recipients`);
+    console.log(`[Stream Emoji] Broadcast to ${sentCount} recipients (excluding sender)`);
+
+    // Also send back to the sender so they see their own emoji
+    if (client.ws.readyState === 1) {
+      client.ws.send(JSON.stringify(emojiMessage));
+      console.log(`[Stream Emoji] Sent back to sender ${client.id}`);
+    }
 
     // Send acknowledgment to sender
     client.ws.send(JSON.stringify({
