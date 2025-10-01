@@ -1278,10 +1278,22 @@ export class WSServer extends EventEmitter {
 
   async handleStreamEmoji(client, data) {
     // Handle emoji reactions sent during a stream
+    console.log(`[Stream Emoji] Received from ${client.address || client.id}:`, JSON.stringify(data));
+
     const { roomId, streamId, emojiData } = data;
-    const targetStreamId = streamId || roomId;
+    let targetStreamId = streamId || roomId;
+
+    // If no stream ID provided, try to infer from client's joined streams
+    if (!targetStreamId) {
+      // If client is only in one stream, use that
+      if (client.joinedStreams && client.joinedStreams.size === 1) {
+        targetStreamId = Array.from(client.joinedStreams)[0];
+        console.log(`[Stream Emoji] Inferred stream ID ${targetStreamId} from client's joined streams`);
+      }
+    }
 
     if (!targetStreamId) {
+      console.warn(`[Stream Emoji] No stream ID provided and couldn't infer. Client joined streams:`, client.joinedStreams);
       client.ws.send(JSON.stringify({
         type: 'error',
         message: 'Stream ID or Room ID required for emoji'
