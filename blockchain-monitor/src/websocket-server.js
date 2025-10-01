@@ -445,6 +445,10 @@ export class WSServer extends EventEmitter {
         await this.handleStreamJoined(client, data);
         break;
 
+      case 'stream-emoji':
+        await this.handleStreamEmoji(client, data);
+        break;
+
       // WebRTC signaling messages
       case 'webrtc-request':
         await this.handleWebRTCRequest(client, data);
@@ -1270,6 +1274,79 @@ export class WSServer extends EventEmitter {
     }
 
     console.log(`[Stream Update] Stream ${streamId} updated: title="${streamInfo.title}", quality=${streamInfo.quality}`);
+  }
+
+  async handleStreamEmoji(client, data) {
+    // Handle emoji reactions sent during a stream
+    const { roomId, streamId, emojiData } = data;
+    const targetStreamId = streamId || roomId;
+
+    if (!targetStreamId) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream ID or Room ID required for emoji'
+      }));
+      return;
+    }
+
+    // Verify the stream exists
+    const streamInfo = this.activeStreams.get(targetStreamId);
+    if (!streamInfo) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream not found'
+      }));
+      return;
+    }
+
+    // Get the room for this stream
+    const room = this.streamRooms.get(targetStreamId);
+    if (!room) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream room not found'
+      }));
+      return;
+    }
+
+    // Add sender info to emoji data if not present
+    const enrichedEmojiData = {
+      ...emojiData,
+      senderAddress: client.address || 'anonymous',
+      senderUsername: this.usernameStore.getUsername(client.address) || emojiData.username || 'anonymous',
+      timestamp: emojiData.timestamp || Date.now()
+    };
+
+    // Broadcast emoji to all viewers in the stream room (including streamer)
+    const emojiMessage = {
+      type: 'stream-emoji',
+      roomId: targetStreamId,
+      streamId: targetStreamId,
+      emojiData: enrichedEmojiData
+    };
+
+    console.log(`[Stream Emoji] ${enrichedEmojiData.senderUsername} sent ${enrichedEmojiData.emoji} to stream ${targetStreamId}`);
+
+    // Send to all clients in the stream (streamer + viewers)
+    for (const [viewerId, viewer] of room.viewers) {
+      if (viewer.ws && viewer.ws.readyState === 1) {
+        viewer.ws.send(JSON.stringify(emojiMessage));
+      }
+    }
+
+    // Also send to the streamer if not already in viewers
+    const streamerClient = this.clients.get(streamInfo.clientId);
+    if (streamerClient && streamerClient.ws.readyState === 1) {
+      streamerClient.ws.send(JSON.stringify(emojiMessage));
+    }
+
+    // Send acknowledgment to sender
+    client.ws.send(JSON.stringify({
+      type: 'stream-emoji-ack',
+      streamId: targetStreamId,
+      emojiData: enrichedEmojiData,
+      timestamp: Date.now()
+    }));
   }
 
   async handleViewerJoin(client, data) {
