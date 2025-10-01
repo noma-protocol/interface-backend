@@ -275,11 +275,10 @@ export class WSServer extends EventEmitter {
                 }
               }
 
-              // Clean up empty room
+              // Clean up empty room membership (but preserve messages)
               if (chatRoom.size === 0) {
                 this.rooms.delete(roomId);
-                this.roomMessages.delete(roomId);
-                console.log(`[Room] Deleted empty room after disconnect: ${roomId}`);
+                console.log(`[Room] Deleted empty room membership after disconnect: ${roomId} (messages preserved)`);
               }
             }
           }
@@ -959,11 +958,15 @@ export class WSServer extends EventEmitter {
 
     console.log(`[Room] Client ${client.id} (${client.address}) joined room ${roomId}`);
 
-    // Send confirmation
+    // Get room message history
+    const roomMessageHistory = this.roomMessages.get(roomId) || [];
+
+    // Send confirmation with message history
     client.ws.send(JSON.stringify({
       type: 'room-joined',
       roomId,
       memberCount: room.size,
+      messages: roomMessageHistory,
       timestamp: Date.now()
     }));
 
@@ -1018,11 +1021,10 @@ export class WSServer extends EventEmitter {
 
     console.log(`[Room] Client ${client.id} (${client.address}) left room ${roomId}`);
 
-    // If room is empty, delete it
+    // If room is empty, delete the membership Set but keep messages
     if (room.size === 0) {
       this.rooms.delete(roomId);
-      this.roomMessages.delete(roomId);
-      console.log(`[Room] Deleted empty room: ${roomId}`);
+      console.log(`[Room] Deleted empty room membership: ${roomId} (messages preserved)`);
     } else {
       // Notify remaining members
       const notification = JSON.stringify({
@@ -1715,7 +1717,10 @@ export class WSServer extends EventEmitter {
 
     console.log(`[Room] Client ${client.id} auto-joined stream chat room ${chatRoomId}`);
 
-    // Send stream info to the viewer
+    // Get room message history
+    const roomMessageHistory = this.roomMessages.get(chatRoomId) || [];
+
+    // Send stream info to the viewer with chat history
     client.ws.send(JSON.stringify({
       type: 'viewer-join-ack',
       streamId: targetStreamId,
@@ -1728,6 +1733,7 @@ export class WSServer extends EventEmitter {
         quality: streamInfo.quality,
         startedAt: streamInfo.startedAt
       },
+      messages: roomMessageHistory,
       timestamp: Date.now()
     }));
 
@@ -1780,11 +1786,10 @@ export class WSServer extends EventEmitter {
       }
       console.log(`[Room] Client ${client.id} auto-left stream chat room ${chatRoomId}`);
 
-      // Clean up empty room
+      // Clean up empty room membership (preserve messages until stream ends)
       if (chatRoom.size === 0) {
         this.rooms.delete(chatRoomId);
-        this.roomMessages.delete(chatRoomId);
-        console.log(`[Room] Deleted empty stream chat room: ${chatRoomId}`);
+        console.log(`[Room] Deleted empty stream chat room membership: ${chatRoomId} (messages preserved)`);
       }
     }
 
