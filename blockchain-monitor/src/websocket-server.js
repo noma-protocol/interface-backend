@@ -1339,18 +1339,42 @@ export class WSServer extends EventEmitter {
 
     console.log(`[Stream Emoji] ${enrichedEmojiData.senderUsername} sent ${enrichedEmojiData.emoji} to stream ${targetStreamId}`);
 
-    // Send to all clients in the stream (streamer + viewers)
+    let sentCount = 0;
+
+    // Send to all viewers in the room
     for (const [viewerId, viewer] of room.viewers) {
       if (viewer.ws && viewer.ws.readyState === 1) {
         viewer.ws.send(JSON.stringify(emojiMessage));
+        sentCount++;
+        console.log(`[Stream Emoji] Sent to viewer ${viewerId}`);
       }
     }
 
-    // Also send to the streamer if not already in viewers
+    // Always send to the streamer (broadcaster)
     const streamerClient = this.clients.get(streamInfo.clientId);
     if (streamerClient && streamerClient.ws.readyState === 1) {
       streamerClient.ws.send(JSON.stringify(emojiMessage));
+      sentCount++;
+      console.log(`[Stream Emoji] Sent to streamer ${streamInfo.clientId}`);
     }
+
+    // Also broadcast to all clients who have joined this stream (in case they're not in room.viewers yet)
+    for (const [clientId, otherClient] of this.clients) {
+      if (clientId !== client.id &&
+          clientId !== streamInfo.clientId &&
+          otherClient.joinedStreams &&
+          otherClient.joinedStreams.has(targetStreamId) &&
+          otherClient.ws.readyState === 1) {
+        // Check if not already sent via room.viewers
+        if (!room.viewers.has(clientId)) {
+          otherClient.ws.send(JSON.stringify(emojiMessage));
+          sentCount++;
+          console.log(`[Stream Emoji] Sent to joined client ${clientId}`);
+        }
+      }
+    }
+
+    console.log(`[Stream Emoji] Broadcast to ${sentCount} recipients`);
 
     // Send acknowledgment to sender
     client.ws.send(JSON.stringify({
