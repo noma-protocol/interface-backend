@@ -66,6 +66,10 @@ export class WSServer extends EventEmitter {
     this.streamRooms = new Map(); // Track stream rooms with viewers
     this.pendingIceCandidates = new Map(); // Buffer ICE candidates until offer/answer exchange: connectionKey -> [candidates]
 
+    // Room-level chat
+    this.rooms = new Map(); // Map<roomId, Set<clientId>>
+    this.roomMessages = new Map(); // Map<roomId, Message[]>
+
     // Admin addresses (can be configured)
     this.adminAddresses = new Set([
       // Add admin addresses here
@@ -203,7 +207,7 @@ export class WSServer extends EventEmitter {
       ws.on('close', () => {
         const clientInfo = this.clients.get(clientId);
         const wasAuthenticated = clientInfo ? clientInfo.authenticated : false;
-        
+
         // Handle client leaving streams they joined
         if (clientInfo && clientInfo.joinedStreams) {
           for (const streamId of clientInfo.joinedStreams) {
@@ -212,7 +216,7 @@ export class WSServer extends EventEmitter {
             if (room) {
               room.removeViewer(clientId);
             }
-            
+
             const streamInfo = this.activeStreams.get(streamId);
             if (streamInfo) {
               // Notify streamer that viewer left
@@ -226,7 +230,7 @@ export class WSServer extends EventEmitter {
                   timestamp: Date.now()
                 }));
               }
-              
+
               // Notify other viewers
               for (const [otherId, otherClient] of this.clients) {
                 if (otherId !== clientId && otherId !== streamInfo.clientId &&
@@ -245,12 +249,52 @@ export class WSServer extends EventEmitter {
             }
           }
         }
-        
+
+        // Handle client leaving chat rooms
+        if (clientInfo && clientInfo.joinedRooms) {
+          for (const roomId of clientInfo.joinedRooms) {
+            const chatRoom = this.rooms.get(roomId);
+            if (chatRoom) {
+              chatRoom.delete(clientId);
+
+              // Notify remaining room members
+              const notification = JSON.stringify({
+                type: 'room-member-left',
+                roomId,
+                memberId: clientId,
+                memberAddress: clientInfo.address,
+                username: this.usernameStore.getUsername(clientInfo.address),
+                memberCount: chatRoom.size,
+                timestamp: Date.now()
+              });
+
+              for (const memberId of chatRoom) {
+                const memberClient = this.clients.get(memberId);
+                if (memberClient && memberClient.ws.readyState === 1) {
+                  memberClient.ws.send(notification);
+                }
+              }
+
+              // Clean up empty room
+              if (chatRoom.size === 0) {
+                this.rooms.delete(roomId);
+                this.roomMessages.delete(roomId);
+                console.log(`[Room] Deleted empty room after disconnect: ${roomId}`);
+              }
+            }
+          }
+        }
+
         // End any active streams for this client
         for (const [streamId, streamInfo] of this.activeStreams) {
           if (streamInfo.clientId === clientId) {
             this.activeStreams.delete(streamId);
             this.streamRooms.delete(streamId);
+
+            // Also clean up the stream's chat room
+            const chatRoomId = `stream:${streamId}`;
+            this.rooms.delete(chatRoomId);
+            this.roomMessages.delete(chatRoomId);
 
             // Notify all clients that the stream ended
             const notification = {
@@ -289,14 +333,14 @@ export class WSServer extends EventEmitter {
 
         // Remove client from map
         this.clients.delete(clientId);
-        
+
         // Clean up address mapping
         if (clientInfo && clientInfo.address) {
           this.addressToClientId.delete(clientInfo.address);
         }
-        
+
         this.updateUserCount();
-        
+
         // Decrease connection count for this IP
         const currentConnections = this.connectionsByIp.get(clientIp) || 0;
         if (currentConnections > 1) {
@@ -304,7 +348,7 @@ export class WSServer extends EventEmitter {
         } else {
           this.connectionsByIp.delete(clientIp);
         }
-        
+
         if (global.DEBUG) {
           console.log(`Client disconnected:`, {
             clientId,
@@ -447,6 +491,19 @@ export class WSServer extends EventEmitter {
 
       case 'stream-emoji':
         await this.handleStreamEmoji(client, data);
+        break;
+
+      // Room-level chat
+      case 'join-room':
+        await this.handleJoinRoom(client, data);
+        break;
+
+      case 'leave-room':
+        await this.handleLeaveRoom(client, data);
+        break;
+
+      case 'getRoomMessages':
+        await this.handleGetRoomMessages(client, data);
         break;
 
       // WebRTC signaling messages
@@ -776,7 +833,7 @@ export class WSServer extends EventEmitter {
       return;
     }
 
-    const { content, replyTo } = data;
+    const { content, replyTo, room } = data;
 
     // Validate message
     if (!content || typeof content !== 'string' || content.trim().length === 0) {
@@ -804,7 +861,61 @@ export class WSServer extends EventEmitter {
     // Get username
     const username = this.usernameStore.getUsername(client.address);
 
-    // Add message to store
+    // Room-specific message
+    if (room) {
+      const roomId = room;
+
+      // Check if client is in the room
+      const roomMembers = this.rooms.get(roomId);
+      if (!roomMembers || !roomMembers.has(client.id)) {
+        client.ws.send(JSON.stringify({
+          type: 'error',
+          message: 'You must join the room before sending messages'
+        }));
+        return;
+      }
+
+      // Create room message
+      const message = {
+        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        username,
+        address: client.address,
+        content: content.trim(),
+        timestamp: Date.now(),
+        verified: true,
+        replyTo: replyTo || null,
+        room: roomId
+      };
+
+      // Store in room messages
+      if (!this.roomMessages.has(roomId)) {
+        this.roomMessages.set(roomId, []);
+      }
+      const roomMessageHistory = this.roomMessages.get(roomId);
+      roomMessageHistory.push(message);
+
+      // Keep only last 100 messages per room
+      if (roomMessageHistory.length > 100) {
+        roomMessageHistory.shift();
+      }
+
+      // Broadcast only to room members
+      const messagePayload = JSON.stringify({
+        type: 'message',
+        message
+      });
+
+      for (const memberId of roomMembers) {
+        const memberClient = this.clients.get(memberId);
+        if (memberClient && memberClient.ws.readyState === 1) {
+          memberClient.ws.send(messagePayload);
+        }
+      }
+
+      return;
+    }
+
+    // Global message (no room specified)
     const message = await this.messageStore.addMessage(
       username,
       client.address,
@@ -817,6 +928,150 @@ export class WSServer extends EventEmitter {
       type: 'message',
       message
     });
+  }
+
+  async handleJoinRoom(client, data) {
+    const { roomId } = data;
+
+    if (!roomId || typeof roomId !== 'string') {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Invalid room ID'
+      }));
+      return;
+    }
+
+    // Create room if it doesn't exist
+    if (!this.rooms.has(roomId)) {
+      this.rooms.set(roomId, new Set());
+      console.log(`[Room] Created new room: ${roomId}`);
+    }
+
+    // Add client to room
+    const room = this.rooms.get(roomId);
+    room.add(client.id);
+
+    // Track rooms on client
+    if (!client.joinedRooms) {
+      client.joinedRooms = new Set();
+    }
+    client.joinedRooms.add(roomId);
+
+    console.log(`[Room] Client ${client.id} (${client.address}) joined room ${roomId}`);
+
+    // Send confirmation
+    client.ws.send(JSON.stringify({
+      type: 'room-joined',
+      roomId,
+      memberCount: room.size,
+      timestamp: Date.now()
+    }));
+
+    // Notify other room members
+    const notification = JSON.stringify({
+      type: 'room-member-joined',
+      roomId,
+      memberId: client.id,
+      memberAddress: client.address,
+      username: this.usernameStore.getUsername(client.address),
+      memberCount: room.size,
+      timestamp: Date.now()
+    });
+
+    for (const memberId of room) {
+      if (memberId !== client.id) {
+        const memberClient = this.clients.get(memberId);
+        if (memberClient && memberClient.ws.readyState === 1) {
+          memberClient.ws.send(notification);
+        }
+      }
+    }
+  }
+
+  async handleLeaveRoom(client, data) {
+    const { roomId } = data;
+
+    if (!roomId || typeof roomId !== 'string') {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Invalid room ID'
+      }));
+      return;
+    }
+
+    const room = this.rooms.get(roomId);
+    if (!room) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Room not found'
+      }));
+      return;
+    }
+
+    // Remove client from room
+    room.delete(client.id);
+
+    // Remove from client tracking
+    if (client.joinedRooms) {
+      client.joinedRooms.delete(roomId);
+    }
+
+    console.log(`[Room] Client ${client.id} (${client.address}) left room ${roomId}`);
+
+    // If room is empty, delete it
+    if (room.size === 0) {
+      this.rooms.delete(roomId);
+      this.roomMessages.delete(roomId);
+      console.log(`[Room] Deleted empty room: ${roomId}`);
+    } else {
+      // Notify remaining members
+      const notification = JSON.stringify({
+        type: 'room-member-left',
+        roomId,
+        memberId: client.id,
+        memberAddress: client.address,
+        username: this.usernameStore.getUsername(client.address),
+        memberCount: room.size,
+        timestamp: Date.now()
+      });
+
+      for (const memberId of room) {
+        const memberClient = this.clients.get(memberId);
+        if (memberClient && memberClient.ws.readyState === 1) {
+          memberClient.ws.send(notification);
+        }
+      }
+    }
+
+    // Send confirmation
+    client.ws.send(JSON.stringify({
+      type: 'room-left',
+      roomId,
+      timestamp: Date.now()
+    }));
+  }
+
+  async handleGetRoomMessages(client, data) {
+    const { roomId, limit = 50 } = data;
+
+    if (!roomId || typeof roomId !== 'string') {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Invalid room ID'
+      }));
+      return;
+    }
+
+    // Get room messages
+    const roomMessageHistory = this.roomMessages.get(roomId) || [];
+    const messages = roomMessageHistory.slice(-limit);
+
+    client.ws.send(JSON.stringify({
+      type: 'room-messages',
+      roomId,
+      messages,
+      timestamp: Date.now()
+    }));
   }
 
   async handleChangeUsername(client, data) {
@@ -1444,10 +1699,27 @@ export class WSServer extends EventEmitter {
       });
     }
 
+    // Auto-join the stream's chat room
+    const chatRoomId = `stream:${targetStreamId}`;
+    if (!this.rooms.has(chatRoomId)) {
+      this.rooms.set(chatRoomId, new Set());
+      console.log(`[Room] Auto-created stream chat room: ${chatRoomId}`);
+    }
+    const chatRoom = this.rooms.get(chatRoomId);
+    chatRoom.add(client.id);
+
+    if (!client.joinedRooms) {
+      client.joinedRooms = new Set();
+    }
+    client.joinedRooms.add(chatRoomId);
+
+    console.log(`[Room] Client ${client.id} auto-joined stream chat room ${chatRoomId}`);
+
     // Send stream info to the viewer
     client.ws.send(JSON.stringify({
       type: 'viewer-join-ack',
       streamId: targetStreamId,
+      roomId: chatRoomId,
       streamInfo: {
         title: streamInfo.title,
         streamer: streamInfo.streamer,
@@ -1496,6 +1768,24 @@ export class WSServer extends EventEmitter {
     const room = this.streamRooms.get(targetStreamId);
     if (room) {
       room.removeViewer(client.id);
+    }
+
+    // Auto-leave the stream's chat room
+    const chatRoomId = `stream:${targetStreamId}`;
+    const chatRoom = this.rooms.get(chatRoomId);
+    if (chatRoom) {
+      chatRoom.delete(client.id);
+      if (client.joinedRooms) {
+        client.joinedRooms.delete(chatRoomId);
+      }
+      console.log(`[Room] Client ${client.id} auto-left stream chat room ${chatRoomId}`);
+
+      // Clean up empty room
+      if (chatRoom.size === 0) {
+        this.rooms.delete(chatRoomId);
+        this.roomMessages.delete(chatRoomId);
+        console.log(`[Room] Deleted empty stream chat room: ${chatRoomId}`);
+      }
     }
 
     // Send acknowledgment to the viewer
