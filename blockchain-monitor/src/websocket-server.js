@@ -402,6 +402,10 @@ export class WSServer extends EventEmitter {
         await this.handleGetMessages(client, data);
         break;
 
+      case 'requestState':
+        await this.handleRequestState(client);
+        break;
+
       case 'request-active-streams':
       case 'get-active-streams':
         await this.handleRequestActiveStreams(client);
@@ -891,6 +895,37 @@ export class WSServer extends EventEmitter {
     client.ws.send(JSON.stringify({
       type: 'messages',
       messages
+    }));
+  }
+
+  async handleRequestState(client) {
+    // Return current server state for the client
+    const activeStreams = Array.from(this.activeStreams.values()).map(stream => {
+      const room = this.streamRooms.get(stream.streamId);
+      const viewerCount = room ? room.getViewerCount() : 0;
+
+      return {
+        streamId: stream.streamId,
+        roomId: stream.roomId,
+        streamer: stream.streamer,
+        username: stream.username,
+        title: stream.title,
+        description: stream.description,
+        quality: stream.quality,
+        startedAt: stream.startedAt,
+        viewerCount,
+        isStreamerOnline: this.clients.has(stream.clientId)
+      };
+    });
+
+    client.ws.send(JSON.stringify({
+      type: 'state',
+      authenticated: client.authenticated,
+      address: client.address,
+      username: this.usernameStore.getUsername(client.address) || null,
+      clientId: client.id,
+      activeStreams,
+      timestamp: Date.now()
     }));
   }
 
