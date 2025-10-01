@@ -1349,18 +1349,26 @@ export class WSServer extends EventEmitter {
     // Send to all viewers in the room
     for (const [viewerId, viewer] of room.viewers) {
       if (viewer.ws && viewer.ws.readyState === 1) {
-        viewer.ws.send(JSON.stringify(emojiMessage));
+        const messageStr = JSON.stringify(emojiMessage);
+        console.log(`[Stream Emoji] Sending to viewer ${viewerId}:`, messageStr);
+        viewer.ws.send(messageStr);
         sentCount++;
-        console.log(`[Stream Emoji] Sent to viewer ${viewerId}`);
+        console.log(`[Stream Emoji] ✓ Sent to viewer ${viewerId}`);
+      } else {
+        console.log(`[Stream Emoji] ✗ Skipped viewer ${viewerId} - ws readyState: ${viewer.ws ? viewer.ws.readyState : 'no ws'}`);
       }
     }
 
     // Always send to the streamer (broadcaster)
     const streamerClient = this.clients.get(streamInfo.clientId);
     if (streamerClient && streamerClient.ws.readyState === 1) {
-      streamerClient.ws.send(JSON.stringify(emojiMessage));
+      const messageStr = JSON.stringify(emojiMessage);
+      console.log(`[Stream Emoji] Sending to streamer ${streamInfo.clientId}:`, messageStr);
+      streamerClient.ws.send(messageStr);
       sentCount++;
-      console.log(`[Stream Emoji] Sent to streamer ${streamInfo.clientId}`);
+      console.log(`[Stream Emoji] ✓ Sent to streamer ${streamInfo.clientId}`);
+    } else {
+      console.log(`[Stream Emoji] ✗ Streamer ${streamInfo.clientId} not available - readyState: ${streamerClient ? streamerClient.ws.readyState : 'not found'}`);
     }
 
     // Also broadcast to all clients who have joined this stream (in case they're not in room.viewers yet)

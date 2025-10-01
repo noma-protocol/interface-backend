@@ -15,7 +15,16 @@ export class UsernameStore {
     try {
       const data = await fs.readFile(this.filePath, 'utf-8');
       const parsed = JSON.parse(data);
-      this.usernames = new Map(Object.entries(parsed.usernames || {}));
+
+      // Handle both old flat format and new nested format
+      if (parsed.usernames) {
+        // New format: { usernames: { address: {...} }, lastUpdated: ... }
+        this.usernames = new Map(Object.entries(parsed.usernames));
+      } else {
+        // Old format: { address: {...} } directly at root
+        this.usernames = new Map(Object.entries(parsed));
+      }
+
       console.log(`Loaded ${this.usernames.size} usernames from storage`);
     } catch (error) {
       if (error.code === 'ENOENT') {
