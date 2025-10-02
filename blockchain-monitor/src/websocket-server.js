@@ -70,6 +70,9 @@ export class WSServer extends EventEmitter {
     this.rooms = new Map(); // Map<roomId, Set<clientId>>
     this.roomMessages = new Map(); // Map<roomId, Message[]>
 
+    // Viewer audio state tracking for bi-directional audio
+    this.viewerAudioStates = new Map(); // Map<streamId, Map<viewerId, boolean>>
+
     // Admin addresses (can be configured)
     this.adminAddresses = new Set([
       // Add admin addresses here
@@ -287,8 +290,13 @@ export class WSServer extends EventEmitter {
         // End any active streams for this client
         for (const [streamId, streamInfo] of this.activeStreams) {
           if (streamInfo.clientId === clientId) {
+            console.log(`[Disconnect] 🛑 Removing stream ${streamId} for disconnected client ${clientId}`);
             this.activeStreams.delete(streamId);
             this.streamRooms.delete(streamId);
+            console.log(`[Disconnect] Total streams remaining: ${this.activeStreams.size}`);
+
+            // Clean up viewer audio states for this stream
+            this.clearViewerAudioStates(streamId);
 
             // Also clean up the stream's chat room
             const chatRoomId = `stream:${streamId}`;
@@ -509,17 +517,26 @@ export class WSServer extends EventEmitter {
       case 'webrtc-request':
         await this.handleWebRTCRequest(client, data);
         break;
-        
+
       case 'webrtc-offer':
         await this.handleWebRTCOffer(client, data);
         break;
-        
+
       case 'webrtc-answer':
         await this.handleWebRTCAnswer(client, data);
         break;
-        
+
       case 'webrtc-ice':
         await this.handleWebRTCIce(client, data);
+        break;
+
+      // Bi-directional audio messages
+      case 'request-viewer-audio':
+        await this.handleRequestViewerAudio(client, data);
+        break;
+
+      case 'viewer-audio-state':
+        await this.handleViewerAudioState(client, data);
         break;
 
       case 'join':
@@ -1201,6 +1218,17 @@ export class WSServer extends EventEmitter {
     }
 
     console.log(`[Request Active Streams] Total active streams: ${this.activeStreams.size}`);
+    if (this.activeStreams.size > 0) {
+      console.log(`[Request Active Streams] Stream IDs:`, Array.from(this.activeStreams.keys()));
+      console.log(`[Request Active Streams] Stream details:`, Array.from(this.activeStreams.values()).map(s => ({
+        streamId: s.streamId,
+        streamer: s.streamer,
+        username: s.username,
+        title: s.title,
+        clientId: s.clientId,
+        isClientOnline: this.clients.has(s.clientId)
+      })));
+    }
 
     // Get all active video streams with viewer count
     const activeStreams = Array.from(this.activeStreams.values()).map(stream => {
@@ -1328,6 +1356,7 @@ export class WSServer extends EventEmitter {
       viewerCount: 0
     };
     this.activeStreams.set(streamId, streamInfo);
+    console.log(`[Stream Start] ✅ Stream added to activeStreams. Total streams: ${this.activeStreams.size}`);
 
     // Create stream room
     const room = new StreamRoom(streamId, client, streamerAddress);
@@ -1390,7 +1419,7 @@ export class WSServer extends EventEmitter {
   async handleStreamEnd(client, data) {
     // Handle when a user ends streaming
     const { streamId } = data;
-    
+
     const streamInfo = this.activeStreams.get(streamId);
     if (!streamInfo) {
       client.ws.send(JSON.stringify({
@@ -1399,7 +1428,7 @@ export class WSServer extends EventEmitter {
       }));
       return;
     }
-    
+
     // Check if client owns this stream
     if (streamInfo.clientId !== client.id) {
       client.ws.send(JSON.stringify({
@@ -1408,10 +1437,14 @@ export class WSServer extends EventEmitter {
       }));
       return;
     }
-    
+
     // Remove from active streams and rooms
     this.activeStreams.delete(streamId);
     this.streamRooms.delete(streamId);
+    console.log(`[Stream End] 🛑 Stream removed from activeStreams. Total streams: ${this.activeStreams.size}`);
+
+    // Clean up viewer audio states for this stream
+    this.clearViewerAudioStates(streamId);
     
     // Create end message
     const message = `📴 ${streamInfo.username} ended streaming: "${streamInfo.title}"`;
@@ -2070,42 +2103,42 @@ export class WSServer extends EventEmitter {
   }
 
   async handleWebRTCOffer(client, data) {
-    // Broadcaster sends offer to viewer
+    // Broadcaster sends offer to viewer (including renegotiation for audio tracks)
     if (data.to) {
       // Always use server's verified client info, never trust client-provided 'from'
       const from = client.address || client.id;
+      const isRenegotiation = data.isRenegotiation || false;
 
-      // Try by clientId first
-      let targetClient = this.clients.get(data.to);
+      if (isRenegotiation) {
+        console.log(`[WebRTC] Renegotiation offer from ${client.id} (${client.address}) to ${data.to} for stream ${data.streamId}`);
+      }
+
+      // Try by address first (prioritize for renegotiation since viewers send to wallet address)
+      let targetClient = this.findWebSocketByAddress(data.to);
+
+      // Fall back to clientId if address lookup failed
+      if (!targetClient) {
+        targetClient = this.clients.get(data.to);
+      }
+
       if (targetClient && targetClient.ws.readyState === 1) {
+        console.log(`[WebRTC] Forwarding ${isRenegotiation ? 'renegotiation ' : ''}offer to ${targetClient.address || targetClient.id}`);
+
         targetClient.ws.send(JSON.stringify({
           type: 'webrtc-offer',
           streamId: data.streamId,
           from: from,
           fromClientId: client.id,
           fromAddress: client.address,
-          offer: data.offer
+          offer: data.offer,
+          isRenegotiation
         }));
 
         // Flush any buffered ICE candidates for this connection
         this.flushPendingIceCandidates(data.to, from, data.streamId);
-        return;
-      }
-
-      // Try sending by address if clientId failed
-      const targetByAddress = this.findWebSocketByAddress(data.to);
-      if (targetByAddress && targetByAddress.ws.readyState === 1) {
-        targetByAddress.ws.send(JSON.stringify({
-          type: 'webrtc-offer',
-          streamId: data.streamId,
-          from: from,
-          fromClientId: client.id,
-          fromAddress: client.address,
-          offer: data.offer
-        }));
-
-        // Flush any buffered ICE candidates for this connection
-        this.flushPendingIceCandidates(data.to, from, data.streamId);
+      } else {
+        console.warn(`[WebRTC] Failed to route offer to ${data.to} - target not found or not connected`);
+        console.warn(`[WebRTC] Available addresses: ${Array.from(this.addressToClientId.keys()).join(', ')}`);
       }
     }
   }
@@ -2115,38 +2148,38 @@ export class WSServer extends EventEmitter {
     if (data.to) {
       // Always use server's verified client info
       const from = client.address || client.id;
+      const isRenegotiation = data.isRenegotiation || false;
 
-      // Try by address first
+      if (isRenegotiation) {
+        console.log(`[WebRTC] Renegotiation answer from ${client.id} (${client.address}) to ${data.to} for stream ${data.streamId}`);
+      }
+
+      // Try by address first (prioritize for renegotiation since answers go to wallet address)
       let targetClient = this.findWebSocketByAddress(data.to);
+
+      // Fall back to clientId if address lookup failed
+      if (!targetClient) {
+        targetClient = this.clients.get(data.to);
+      }
+
       if (targetClient && targetClient.ws.readyState === 1) {
+        console.log(`[WebRTC] Forwarding ${isRenegotiation ? 'renegotiation ' : ''}answer to ${targetClient.address || targetClient.id}`);
+
         targetClient.ws.send(JSON.stringify({
           type: 'webrtc-answer',
           streamId: data.streamId,
           from: from,
           fromClientId: client.id,
           fromAddress: client.address,
-          answer: data.answer
+          answer: data.answer,
+          isRenegotiation
         }));
 
         // Flush any buffered ICE candidates for this connection
         this.flushPendingIceCandidates(data.to, from, data.streamId);
-        return;
-      }
-
-      // Try sending by clientId if address failed
-      const targetById = this.clients.get(data.to);
-      if (targetById && targetById.ws.readyState === 1) {
-        targetById.ws.send(JSON.stringify({
-          type: 'webrtc-answer',
-          streamId: data.streamId,
-          from: from,
-          fromClientId: client.id,
-          fromAddress: client.address,
-          answer: data.answer
-        }));
-
-        // Flush any buffered ICE candidates for this connection
-        this.flushPendingIceCandidates(data.to, from, data.streamId);
+      } else {
+        console.warn(`[WebRTC] Failed to route answer to ${data.to} - target not found or not connected`);
+        console.warn(`[WebRTC] Available addresses: ${Array.from(this.addressToClientId.keys()).join(', ')}`);
       }
     }
   }
@@ -2158,13 +2191,15 @@ export class WSServer extends EventEmitter {
       const from = client.address || client.id;
       const connectionKey = this.getConnectionKey(data.to, from, data.streamId);
 
-      // Try both clientId and address
-      const targetClient = this.clients.get(data.to);
-      const targetByAddress = this.findWebSocketByAddress(data.to);
-      const target = (targetClient && targetClient.ws.readyState === 1) ? targetClient :
-                     (targetByAddress && targetByAddress.ws.readyState === 1) ? targetByAddress : null;
+      // Try by address first (prioritize for renegotiation since ICE candidates go to wallet address)
+      let targetClient = this.findWebSocketByAddress(data.to);
 
-      if (target) {
+      // Fall back to clientId if address lookup failed
+      if (!targetClient) {
+        targetClient = this.clients.get(data.to);
+      }
+
+      if (targetClient && targetClient.ws.readyState === 1) {
         // Check if we should buffer this ICE candidate (offer/answer not yet exchanged)
         if (this.shouldBufferIceCandidate(connectionKey)) {
           // Buffer the candidate
@@ -2182,7 +2217,7 @@ export class WSServer extends EventEmitter {
           console.log(`[ICE Buffer] Buffered candidate for ${connectionKey}, total: ${this.pendingIceCandidates.get(connectionKey).length}`);
         } else {
           // Send immediately - offer/answer already exchanged
-          target.ws.send(JSON.stringify({
+          targetClient.ws.send(JSON.stringify({
             type: 'webrtc-ice',
             streamId: data.streamId,
             from: from,
@@ -2197,10 +2232,124 @@ export class WSServer extends EventEmitter {
       // If target not found, log detailed info
       console.warn(`[ICE] Failed to send ICE candidate to ${data.to}`);
       console.warn(`[ICE] Sender: ${client.id} (${client.address})`);
-      console.warn(`[ICE] Available clients: ${Array.from(this.clients.keys()).join(', ')}`);
-      console.warn(`[ICE] targetClient found: ${!!targetClient}, targetByAddress found: ${!!targetByAddress}`);
-      if (targetClient) console.warn(`[ICE] targetClient readyState: ${targetClient.ws.readyState}`);
-      if (targetByAddress) console.warn(`[ICE] targetByAddress readyState: ${targetByAddress.ws.readyState}`);
+      console.warn(`[ICE] Available addresses: ${Array.from(this.addressToClientId.keys()).join(', ')}`);
+    }
+  }
+
+  async handleRequestViewerAudio(client, data) {
+    // Broadcaster requests to enable/disable viewer's audio
+    const { action, viewerId, streamId, from } = data;
+
+    console.log(`[Audio Request] Broadcaster ${client.address || client.id} requesting ${action} for viewer ${viewerId} in stream ${streamId}`);
+
+    // Validate message fields
+    if (!viewerId || typeof viewerId !== 'string') {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Invalid viewerId'
+      }));
+      return;
+    }
+
+    if (!action || !['enable', 'disable'].includes(action)) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Invalid action - must be "enable" or "disable"'
+      }));
+      return;
+    }
+
+    if (!streamId) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Missing streamId'
+      }));
+      return;
+    }
+
+    // Check authorization - verify sender is the broadcaster
+    if (!this.isStreamBroadcaster(client.id, streamId)) {
+      console.warn(`[Audio Request] Unauthorized: ${client.id} is not broadcaster of stream ${streamId}`);
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Unauthorized: Only broadcaster can request viewer audio'
+      }));
+      return;
+    }
+
+    // Find the viewer's WebSocket connection
+    const viewerClient = this.findWebSocketByAddress(viewerId);
+
+    if (viewerClient && viewerClient.ws.readyState === 1) {
+      // Forward request to viewer
+      viewerClient.ws.send(JSON.stringify({
+        type: 'request-viewer-audio',
+        action,
+        viewerId,
+        streamId,
+        from: client.address || client.id
+      }));
+
+      console.log(`[Audio Request] Forwarded ${action} request to viewer ${viewerId}`);
+    } else {
+      console.warn(`[Audio Request] Viewer ${viewerId} not found or not connected`);
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Viewer not found or offline'
+      }));
+    }
+  }
+
+  async handleViewerAudioState(client, data) {
+    // Viewer reports their audio state change
+    const { viewerId, enabled, streamId, from } = data;
+
+    console.log(`[Audio State] Viewer ${client.address || client.id} audio: ${enabled ? 'enabled' : 'disabled'} in stream ${streamId}`);
+
+    // Validate message fields
+    if (!viewerId || typeof enabled !== 'boolean') {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Invalid viewer-audio-state message'
+      }));
+      return;
+    }
+
+    if (!streamId) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Missing streamId'
+      }));
+      return;
+    }
+
+    // Find the stream
+    const stream = this.activeStreams.get(streamId);
+    if (!stream) {
+      client.ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Stream not found'
+      }));
+      return;
+    }
+
+    // Store audio state
+    this.updateViewerAudioState(streamId, viewerId, enabled);
+
+    // Forward state to broadcaster
+    const broadcasterClient = this.clients.get(stream.clientId);
+    if (broadcasterClient && broadcasterClient.ws.readyState === 1) {
+      broadcasterClient.ws.send(JSON.stringify({
+        type: 'viewer-audio-state',
+        viewerId,
+        enabled,
+        streamId,
+        from: client.address || client.id
+      }));
+
+      console.log(`[Audio State] Forwarded audio state to broadcaster ${stream.clientId}`);
+    } else {
+      console.warn(`[Audio State] Broadcaster ${stream.clientId} not found or not connected`);
     }
   }
 
@@ -2636,6 +2785,8 @@ export class WSServer extends EventEmitter {
           if (streamInfo.clientId === clientId) {
             this.activeStreams.delete(streamId);
             this.streamRooms.delete(streamId);
+            // Clean up viewer audio states
+            this.clearViewerAudioStates(streamId);
           }
         }
 
@@ -2660,6 +2811,29 @@ export class WSServer extends EventEmitter {
     this.updateUserCount();
     console.log(`[Manual Cleanup] Cleaned up ${cleaned} stale connections`);
     return cleaned;
+  }
+
+  // Helper functions for bi-directional audio
+  isStreamBroadcaster(clientId, streamId) {
+    const stream = this.activeStreams.get(streamId);
+    return stream && stream.clientId === clientId;
+  }
+
+  updateViewerAudioState(streamId, viewerId, enabled) {
+    if (!this.viewerAudioStates.has(streamId)) {
+      this.viewerAudioStates.set(streamId, new Map());
+    }
+    this.viewerAudioStates.get(streamId).set(viewerId, enabled);
+    console.log(`[Audio State] Updated viewer ${viewerId} in stream ${streamId}: ${enabled ? 'enabled' : 'disabled'}`);
+  }
+
+  getViewerAudioStates(streamId) {
+    return this.viewerAudioStates.get(streamId) || new Map();
+  }
+
+  clearViewerAudioStates(streamId) {
+    this.viewerAudioStates.delete(streamId);
+    console.log(`[Audio State] Cleared audio states for stream ${streamId}`);
   }
 
   stop() {
@@ -2707,6 +2881,8 @@ export class WSServer extends EventEmitter {
             if (streamInfo.clientId === clientId) {
               this.activeStreams.delete(streamId);
               this.streamRooms.delete(streamId);
+              // Clean up viewer audio states
+              this.clearViewerAudioStates(streamId);
             }
           }
 
