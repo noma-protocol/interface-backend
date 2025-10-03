@@ -608,13 +608,18 @@ export class WSServer extends EventEmitter {
         
         // Track connection by address for direct routing
         if (address) {
-          // Remove any existing connection for this address
-          for (const [id, c] of this.clients) {
-            if (id !== client.id && c.address === address) {
-              console.log(`Removing duplicate connection for ${address}`);
-              c.ws.close(1000, 'Duplicate connection');
+          const existingClientId = this.addressToClientId.get(address);
+
+          // Only remove if it's a different connection
+          if (existingClientId && existingClientId !== client.id) {
+            const existingClient = this.clients.get(existingClientId);
+
+            if (existingClient && existingClient.ws.readyState === 1) { // OPEN
+              console.log(`Removing duplicate connection for ${address} (old: ${existingClientId}, new: ${client.id})`);
+              existingClient.ws.close(1000, 'Duplicate connection - newer connection established');
             }
           }
+
           // Update address mapping
           this.addressToClientId.set(address, client.id);
         }
