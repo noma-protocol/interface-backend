@@ -26,17 +26,25 @@ export class VaultService {
   }
 
   async getAllVaults() {
+    // Check cache FIRST before acquiring in-flight lock
+    const cachedVaults = await cache.getContractState('VaultService', 'allVaults', []);
+    if (cachedVaults && cachedVaults.length > 0) {
+      console.log(`Using cached vault list (${cachedVaults.length} vaults)`);
+      return cachedVaults;
+    }
+
     const requestKey = 'getAllVaults';
-    
+
     // Check if request is already in-flight
     if (this.inFlightRequests.has(requestKey)) {
+      console.log('[VaultService] Request already in-flight, waiting...');
       return this.inFlightRequests.get(requestKey);
     }
-    
+
     // Create new request promise
     const requestPromise = this._getAllVaultsImpl();
     this.inFlightRequests.set(requestKey, requestPromise);
-    
+
     try {
       const result = await requestPromise;
       return result;
@@ -47,13 +55,9 @@ export class VaultService {
   
   async _getAllVaultsImpl() {
     try {
-      // Check if we have the complete vault list cached
-      const cachedVaults = await cache.getContractState('VaultService', 'allVaults', []);
-      if (cachedVaults) {
-        console.log(`Using cached vault list (${cachedVaults.length} vaults)`);
-        return cachedVaults;
-      }
-      
+      // Cache check already done in getAllVaults()
+      // Proceed with fetching from contract
+
       // Check cache for deployers first
       let deployers = await cache.getContractState(NomaFactoryAddress, 'getDeployers');
       
@@ -75,7 +79,7 @@ export class VaultService {
           
           if (!vaults) {
             // Add delay before RPC call to respect rate limits
-            await new Promise(resolve => setTimeout(resolve, 400));
+            await new Promise(resolve => setTimeout(resolve, 100));
             // Cache miss - fetch from contract
             vaults = await this.nomaFactoryContract.getVaults(deployer);
             // Cache for 5 minutes
@@ -95,7 +99,7 @@ export class VaultService {
       for (const vaultAddress of allVaultAddresses) {
         try {
           // Add delay between vault info fetches to respect rate limits
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          await new Promise(resolve => setTimeout(resolve, 200));
           const vaultInfo = await this.getVaultInfo(vaultAddress);
           if (vaultInfo) {
             vaultInfos.push(vaultInfo);

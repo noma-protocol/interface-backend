@@ -239,34 +239,60 @@ export class HTTPServer {
 
     // Get vault information
     this.app.get('/vaults', async (req, res) => {
+      const startTime = Date.now();
+
+      // Add timeout promise
+      const timeout = 30000; // 30 seconds
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Request timeout')), timeout)
+      );
+
       try {
         if (!this.vaultService) {
-          return res.status(503).json({ 
-            error: 'Vault service not initialized' 
+          return res.status(503).json({
+            error: 'Vault service not initialized'
           });
         }
 
         const { address } = req.query;
-        
+
+        let result;
         if (address) {
-          // Get vaults for specific address
-          const vaults = await this.vaultService.getVaultsByAddress(address);
-          res.json(JSON.parse(JSON.stringify(vaults, (_, v) => 
-            typeof v === 'bigint' ? v.toString() : v
-          )));
+          // Get vaults for specific address with timeout
+          result = await Promise.race([
+            this.vaultService.getVaultsByAddress(address),
+            timeoutPromise
+          ]);
         } else {
-          // Get all vaults
-          const vaults = await this.vaultService.getAllVaults();
-          res.json(JSON.parse(JSON.stringify(vaults, (_, v) => 
-            typeof v === 'bigint' ? v.toString() : v
-          )));
+          // Get all vaults with timeout
+          result = await Promise.race([
+            this.vaultService.getAllVaults(),
+            timeoutPromise
+          ]);
         }
+
+        const duration = Date.now() - startTime;
+        console.log(`[Vaults] Request completed in ${duration}ms, returned ${result.length} vaults`);
+
+        res.json(JSON.parse(JSON.stringify(result, (_, v) =>
+          typeof v === 'bigint' ? v.toString() : v
+        )));
       } catch (error) {
-        console.error('Error fetching vaults:', error);
-        res.status(500).json({ 
-          error: 'Internal server error', 
-          details: error.message 
-        });
+        const duration = Date.now() - startTime;
+        console.error(`[Vaults] Error after ${duration}ms:`, error.message);
+
+        if (error.message === 'Request timeout') {
+          res.status(504).json({
+            error: 'Request timeout',
+            details: 'The vault service is processing a large request. Please try again in a moment.',
+            duration: duration
+          });
+        } else {
+          res.status(500).json({
+            error: 'Internal server error',
+            details: error.message
+          });
+        }
       }
     });
 
