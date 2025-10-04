@@ -1,0 +1,30 @@
+{
+  "name": "wss",
+  "version": "1.0.0",
+  "description": "WebSocket services for Noma",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "blockchain": "node blockchain-monitor/src/index.js",
+    "blockchain:dev": "node --watch blockchain-monitor/src/index.js",
+    "blockchain:debug": "node blockchain-monitor/src/index.js --debug",
+    "ohlc": "node ohlc/index.js",
+    "start:all": "concurrently \"npm:blockchain\" \"npm:ohlc\"",
+    "start:all:dev": "concurrently \"npm:blockchain:dev\" \"npm:ohlc\""
+  },
+  "dependencies": {
+    "axios": "^1.6.5",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "ethers": "^6.14.3",
+    "express": "^5.1.0",
+    "fs-extra": "^11.3.0",
+    "node-cache": "^5.1.2",
+    "node-fetch": "^3.3.2",
+    "uuid": "^9.0.1",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

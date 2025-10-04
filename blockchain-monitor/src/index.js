@@ -20,7 +20,8 @@ const DEBUG = args.includes('--debug');
 // Set up global debug flag
 global.DEBUG = DEBUG;
 
-dotenv.config();
+// Load .env from blockchain-monitor directory
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
 async function loadPools() {
   try {

@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(curl:*)",
+      "Bash(pkill:*)",
+      "Bash(true)",
+      "Bash(git add:*)",
+      "Bash(node:*)",
+      "Bash(git commit:*)",
+      "Bash(jq:*)",
+      "WebFetch(domain:data.oikos.cash)",
+      "Bash(cp:*)"
+    ],
+    "deny": []
+  },
+  "enableAllProjectMcpServers": false
+}
