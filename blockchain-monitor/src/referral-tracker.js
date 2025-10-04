@@ -70,7 +70,7 @@ export class ReferralTracker {
 
   async loadPoolInfo() {
     try {
-      const poolsPath = path.join(__dirname, '..', 'data', 'pools.json');
+      const poolsPath = path.join(__dirname, '..', '..', 'data', 'pools.json');
       const poolsData = await fs.readFile(poolsPath, 'utf-8');
       const parsed = JSON.parse(poolsData);
 
