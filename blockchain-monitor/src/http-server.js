@@ -202,10 +202,22 @@ export class HTTPServer {
     });
 
     // Get referrals by code and optionally by pool
-    this.app.get('/api/referrals/code/:code/:poolAddress?', (req, res) => {
+    this.app.get('/api/referrals/code/:code/:poolAddress', (req, res) => {
       try {
         const { code, poolAddress } = req.params;
         const referrals = this.referralStore.getReferralsByCode(code, poolAddress);
+        res.json(referrals);
+      } catch (error) {
+        console.error('Error getting referrals by code:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
+    // Get referrals by code (all pools)
+    this.app.get('/api/referrals/code/:code', (req, res) => {
+      try {
+        const { code } = req.params;
+        const referrals = this.referralStore.getReferralsByCode(code);
         res.json(referrals);
       } catch (error) {
         console.error('Error getting referrals by code:', error);
