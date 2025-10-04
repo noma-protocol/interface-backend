@@ -44,15 +44,21 @@ const RATE_LIMIT_CONFIG = {
 };
 
 export class BlockchainMonitor extends EventEmitter {
-  constructor(rpcUrl, poolAddresses) {
+  constructor(rpcUrl, poolAddresses, poolMetadata = []) {
     super();
     this.provider = createProvider(rpcUrl);
     this.poolAddresses = poolAddresses;
     this.contracts = new Map();
+    this.poolMetadata = new Map(); // Map poolAddress -> { symbol, name, etc }
     this.isRunning = false;
     this.requestQueue = [];
     this.lastRequestTime = 0;
     this.exchangeHelper = null;
+
+    // Build pool metadata map
+    for (const pool of poolMetadata) {
+      this.poolMetadata.set(pool.address.toLowerCase(), pool);
+    }
   }
 
   async initialize() {
@@ -333,6 +339,9 @@ export class BlockchainMonitor extends EventEmitter {
         }
       }
       
+      // Get pool metadata
+      const poolMeta = this.poolMetadata.get(poolAddress.toLowerCase());
+
       const eventData = {
         poolAddress,
         eventName: parsedLog.name,
@@ -345,6 +354,9 @@ export class BlockchainMonitor extends EventEmitter {
         // Add actual sender/recipient info
         actualSender: actualSender,
         actualRecipient: actualRecipient,
+        // Add token symbol (capitalized)
+        tokenSymbol: poolMeta?.symbol || 'UNKNOWN',
+        poolName: poolMeta?.name,
         timestamp: Date.now()
       };
 

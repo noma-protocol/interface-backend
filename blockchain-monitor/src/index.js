@@ -27,7 +27,15 @@ async function loadPools() {
     const poolsPath = path.join(__dirname, '..', '..', 'data', 'pools.json');
     const poolsData = await fs.readFile(poolsPath, 'utf-8');
     const poolsConfig = JSON.parse(poolsData);
-    return poolsConfig.pools.map(pool => pool.address);
+    return poolsConfig.pools
+      .filter(pool => pool.enabled !== false)
+      .map(pool => ({
+        address: pool.address,
+        symbol: pool.token0.symbol.toUpperCase(), // Capitalize token symbol
+        name: pool.name,
+        token0: pool.token0,
+        token1: pool.token1
+      }));
   } catch (error) {
     console.error('Failed to load pools from data/pools.json:', error.message);
     return [];
@@ -50,9 +58,10 @@ async function main() {
       throw new Error('RPC_URL environment variable is required');
     }
 
-    const poolAddresses = process.env.POOL_ADDRESSES 
+    const pools = await loadPools();
+    const poolAddresses = process.env.POOL_ADDRESSES
       ? process.env.POOL_ADDRESSES.split(',').map(addr => addr.trim())
-      : await loadPools();
+      : pools.map(p => p.address);
 
     console.log('Initializing services...');
 
@@ -61,7 +70,7 @@ async function main() {
 
     const authManager = new AuthManager();
 
-    const blockchainMonitor = new BlockchainMonitor(rpcUrl, poolAddresses);
+    const blockchainMonitor = new BlockchainMonitor(rpcUrl, poolAddresses, pools);
     await blockchainMonitor.initialize();
 
     // Initialize referral system
