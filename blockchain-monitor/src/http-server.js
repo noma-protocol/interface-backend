@@ -31,9 +31,9 @@ export class HTTPServer {
       console.log('HTTP server referral store initialized');
     }
     
-    // Load tokens from data/tokens.json
+    // Load tokens from blockchain-monitor/data/tokens.json
     try {
-      const tokensPath = path.join(__dirname, '..', '..', 'data', 'tokens.json');
+      const tokensPath = path.join(__dirname, '..', 'data', 'tokens.json');
       const tokensData = await fs.readFile(tokensPath, 'utf-8');
       const parsed = JSON.parse(tokensData);
       this.tokens = parsed.tokens || [];
@@ -301,17 +301,175 @@ export class HTTPServer {
       try {
         // Filter only deployed tokens by default unless explicitly requested
         const includeAll = req.query.includeAll === 'true';
-        
-        const tokens = includeAll ? this.tokens : this.tokens.filter(token => 
+
+        const tokens = includeAll ? this.tokens : this.tokens.filter(token =>
           token.status === 'deployed' || token.status === 'success'
         );
-        
+
         res.json({ tokens });
       } catch (error) {
         console.error('Error fetching tokens:', error);
         res.status(500).json({ error: 'Failed to retrieve tokens' });
       }
     });
+
+    // Get tokens by deployer address
+    this.app.get('/api/tokens/deployer/:address', (req, res) => {
+      try {
+        const { address } = req.params;
+        const tokens = this.tokens.filter(
+          token => token.deployerAddress?.toLowerCase() === address.toLowerCase()
+        );
+        res.json({ tokens });
+      } catch (error) {
+        console.error('Error fetching tokens by deployer:', error);
+        res.status(500).json({ error: 'Failed to retrieve tokens' });
+      }
+    });
+
+    // Save new token
+    this.app.post('/api/tokens', async (req, res) => {
+      try {
+        const tokenData = req.body;
+
+        // Validate required fields
+        const requiredFields = ['tokenName', 'tokenSymbol', 'tokenSupply', 'price', 'floorPrice'];
+        const missingFields = requiredFields.filter(field => !tokenData[field]);
+
+        if (missingFields.length > 0) {
+          return res.status(400).json({
+            error: 'Missing required fields',
+            missingFields
+          });
+        }
+
+        // Add metadata
+        const newToken = {
+          ...tokenData,
+          id: this.generateTokenId(),
+          timestamp: new Date().toISOString(),
+          status: 'pending'
+        };
+
+        this.tokens.push(newToken);
+        await this.saveTokens();
+
+        res.status(201).json({
+          message: 'Token saved successfully',
+          token: newToken
+        });
+      } catch (error) {
+        console.error('Error saving token:', error);
+        res.status(500).json({ error: 'Failed to save token' });
+      }
+    });
+
+    // Update token status
+    this.app.patch('/api/tokens/:id/status', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { status, transactionHash, contractAddress } = req.body;
+
+        if (!status || !['success', 'failed', 'deployed'].includes(status)) {
+          return res.status(400).json({
+            error: 'Invalid status. Must be "success", "failed", or "deployed"'
+          });
+        }
+
+        const tokenIndex = this.tokens.findIndex(token => token.id === id);
+
+        if (tokenIndex === -1) {
+          return res.status(404).json({ error: 'Token not found' });
+        }
+
+        this.tokens[tokenIndex] = {
+          ...this.tokens[tokenIndex],
+          status,
+          ...(transactionHash && { transactionHash }),
+          ...(contractAddress && { contractAddress }),
+          updatedAt: new Date().toISOString()
+        };
+
+        await this.saveTokens();
+
+        res.json({
+          message: 'Token status updated successfully',
+          token: this.tokens[tokenIndex]
+        });
+      } catch (error) {
+        console.error('Error updating token status:', error);
+        res.status(500).json({ error: 'Failed to update token status' });
+      }
+    });
+
+    // Find tokens by symbol
+    this.app.get('/api/tokens/by-symbol/:symbol', (req, res) => {
+      try {
+        const { symbol } = req.params;
+        const tokens = this.tokens.filter(token =>
+          token.tokenSymbol === symbol ||
+          (token.tokenSymbol === `p-${symbol}`) // Also check for presale tokens
+        );
+
+        if (tokens.length === 0) {
+          return res.status(404).json({ error: 'No tokens found with this symbol' });
+        }
+
+        res.json({ tokens });
+      } catch (error) {
+        console.error('Error finding tokens by symbol:', error);
+        res.status(500).json({ error: 'Failed to find tokens' });
+      }
+    });
+
+    // Export tokens as JSON
+    this.app.get('/api/tokens/export', (req, res) => {
+      try {
+        const data = { tokens: this.tokens };
+        const filename = `tokens_export_${new Date().toISOString().split('T')[0]}.json`;
+
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.json(data);
+      } catch (error) {
+        console.error('Error exporting tokens:', error);
+        res.status(500).json({ error: 'Failed to export tokens' });
+      }
+    });
+
+    // Get token statistics
+    this.app.get('/api/tokens/stats', (req, res) => {
+      try {
+        const stats = {
+          total: this.tokens.length,
+          pending: this.tokens.filter(t => t.status === 'pending').length,
+          success: this.tokens.filter(t => t.status === 'success').length,
+          deployed: this.tokens.filter(t => t.status === 'deployed').length,
+          failed: this.tokens.filter(t => t.status === 'failed').length,
+          lastDeployment: this.tokens.length > 0
+            ? this.tokens[this.tokens.length - 1].timestamp
+            : null
+        };
+        res.json(stats);
+      } catch (error) {
+        console.error('Error fetching token stats:', error);
+        res.status(500).json({ error: 'Failed to get statistics' });
+      }
+    });
+  }
+
+  generateTokenId() {
+    return `token-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+  }
+
+  async saveTokens() {
+    try {
+      const tokensPath = path.join(__dirname, '..', 'data', 'tokens.json');
+      await fs.writeFile(tokensPath, JSON.stringify({ tokens: this.tokens }, null, 2));
+    } catch (error) {
+      console.error('Error saving tokens:', error);
+      throw error;
+    }
   }
 
   start() {

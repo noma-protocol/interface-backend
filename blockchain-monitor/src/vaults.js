@@ -98,8 +98,6 @@ export class VaultService {
       const vaultInfos = [];
       for (const vaultAddress of allVaultAddresses) {
         try {
-          // Add delay between vault info fetches to respect rate limits
-          await new Promise(resolve => setTimeout(resolve, 200));
           const vaultInfo = await this.getVaultInfo(vaultAddress);
           if (vaultInfo) {
             vaultInfos.push(vaultInfo);
@@ -176,7 +174,7 @@ export class VaultService {
       }
       
       let poolAddress = ZeroAddress;
-      
+
       if (cachedPoolAddress !== undefined) {
         if (cachedPoolAddress === ZeroAddress) {
           console.log(`Using cached result for ${data.tokenSymbol}: No pool found`);
@@ -187,9 +185,10 @@ export class VaultService {
       } else {
         console.log(`Searching for pool for ${data.tokenSymbol} - token0: ${data.token0}, token1: ${data.token1}`);
       }
-      
+
       try {
-        if (cachedPoolAddress === undefined && poolAddress === ZeroAddress) {
+        // Only search if we don't have a cached result
+        if (cachedPoolAddress === undefined) {
         // First try Uniswap V3 with all fee tiers
         const uniswapFactory = new ethers.Contract(
           protocolAddresses.uniswapV3Factory,
@@ -407,7 +406,10 @@ export class VaultService {
       let vaultInfo = await cache.getContractState(vaultAddress, 'getVaultInfo');
       
       if (!vaultInfo) {
-        // Cache miss - create contract and fetch
+        // Cache miss - add delay before RPC call to respect rate limits
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        // Create contract and fetch
         const vaultContract = new ethers.Contract(
           vaultAddress,
           INomaVault.abi,
@@ -416,7 +418,7 @@ export class VaultService {
 
         // Fetch VaultInfo struct from getVaultInfo() method
         vaultInfo = await vaultContract.getVaultInfo();
-        
+
         // Cache for 1 minute (vault info changes more frequently)
         cache.setContractState(vaultAddress, 'getVaultInfo', [], vaultInfo, 60);
       }
