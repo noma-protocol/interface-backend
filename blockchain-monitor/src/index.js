@@ -65,7 +65,7 @@ async function main() {
 
     console.log('Initializing services...');
 
-    const eventStorage = new EventStorage(historyFilePath);
+    const eventStorage = new EventStorage(historyFilePath, pools);
     await eventStorage.initialize();
 
     const authManager = new AuthManager();

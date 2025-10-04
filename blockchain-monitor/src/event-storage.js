@@ -23,10 +23,16 @@ function bigIntReviver(key, value) {
 }
 
 export class EventStorage {
-  constructor(filePath) {
+  constructor(filePath, poolMetadata = []) {
     this.filePath = filePath;
     this.events = [];
     this.isInitialized = false;
+
+    // Build pool metadata map for quick lookups
+    this.poolMetadata = new Map();
+    for (const pool of poolMetadata) {
+      this.poolMetadata.set(pool.address.toLowerCase(), pool);
+    }
   }
 
   async initialize() {
@@ -84,32 +90,53 @@ export class EventStorage {
     return `${event.transactionHash}-${event.logIndex}`;
   }
 
+  enrichEventWithSymbol(event) {
+    // Add tokenSymbol if not present
+    if (!event.tokenSymbol && event.poolAddress) {
+      const poolMeta = this.poolMetadata.get(event.poolAddress.toLowerCase());
+      if (poolMeta) {
+        return { ...event, tokenSymbol: poolMeta.symbol };
+      }
+    }
+    return event;
+  }
+
   getAllEvents() {
-    return [...this.events];
+    return this.events.map(e => this.enrichEventWithSymbol(e));
   }
 
   getEventsSince(timestamp) {
-    return this.events.filter(event => event.timestamp >= timestamp);
+    return this.events
+      .filter(event => event.timestamp >= timestamp)
+      .map(e => this.enrichEventWithSymbol(e));
   }
 
   getEventsByPool(poolAddress) {
-    return this.events.filter(event => 
-      event.poolAddress.toLowerCase() === poolAddress.toLowerCase()
-    );
+    return this.events
+      .filter(event =>
+        event.poolAddress.toLowerCase() === poolAddress.toLowerCase()
+      )
+      .map(e => this.enrichEventWithSymbol(e));
   }
 
   getEventsByTransactionHash(txHash) {
-    return this.events.filter(event => event.transactionHash === txHash);
+    return this.events
+      .filter(event => event.transactionHash === txHash)
+      .map(e => this.enrichEventWithSymbol(e));
   }
 
   getEventsByBlockRange(startBlock, endBlock) {
-    return this.events.filter(event => 
-      event.blockNumber >= startBlock && event.blockNumber <= endBlock
-    );
+    return this.events
+      .filter(event =>
+        event.blockNumber >= startBlock && event.blockNumber <= endBlock
+      )
+      .map(e => this.enrichEventWithSymbol(e));
   }
 
   getEventsByType(eventName) {
-    return this.events.filter(event => event.eventName === eventName);
+    return this.events
+      .filter(event => event.eventName === eventName)
+      .map(e => this.enrichEventWithSymbol(e));
   }
 
   getEventCount() {
@@ -117,13 +144,19 @@ export class EventStorage {
   }
 
   getLatestEvents(limit = 100) {
-    return this.events.slice(-limit).reverse();
+    return this.events
+      .slice(-limit)
+      .reverse()
+      .map(e => this.enrichEventWithSymbol(e));
   }
 
   getLatestTrades(limit = 50) {
     // Filter only Swap events (trades) and return the most recent ones
     const swapEvents = this.events.filter(event => event.eventName === 'Swap');
-    return swapEvents.slice(-limit).reverse();
+    return swapEvents
+      .slice(-limit)
+      .reverse()
+      .map(e => this.enrichEventWithSymbol(e));
   }
 
   getLatestGlobalTrades(limit = 50) {
@@ -132,25 +165,35 @@ export class EventStorage {
       .filter(event => event.eventName === 'Swap')
       .slice(-limit)
       .reverse();
-    
-    // Add formatted trade info for easier consumption
-    return swapEvents.map(event => ({
-      ...event,
-      tradeInfo: this.formatTradeInfo(event)
-    }));
+
+    // Add formatted trade info and enrich with symbol
+    return swapEvents.map(event => {
+      const enrichedEvent = this.enrichEventWithSymbol(event);
+      return {
+        ...enrichedEvent,
+        tradeInfo: this.formatTradeInfo(enrichedEvent)
+      };
+    });
   }
 
   formatTradeInfo(event) {
     if (event.eventName !== 'Swap') return null;
-    
+
     const args = event.args;
     const amount0 = BigInt(args.amount0 || '0');
     const amount1 = BigInt(args.amount1 || '0');
-    
+
     // Determine trade direction
     const isBuy = amount0 > 0n && amount1 < 0n;
     const isSell = amount0 < 0n && amount1 > 0n;
-    
+
+    // Get token symbol from event (if it was added) or from pool metadata
+    let tokenSymbol = event.tokenSymbol;
+    if (!tokenSymbol && event.poolAddress) {
+      const poolMeta = this.poolMetadata.get(event.poolAddress.toLowerCase());
+      tokenSymbol = poolMeta?.symbol || 'UNKNOWN';
+    }
+
     return {
       type: isBuy ? 'buy' : isSell ? 'sell' : 'unknown',
       amount0: args.amount0,
@@ -159,7 +202,9 @@ export class EventStorage {
       recipient: args.recipient,
       // Include actual sender/recipient if available
       actualSender: event.actualSender || args.sender,
-      actualRecipient: event.actualRecipient || args.recipient
+      actualRecipient: event.actualRecipient || args.recipient,
+      // Add capitalized token symbol
+      tokenSymbol: tokenSymbol
     };
   }
 
