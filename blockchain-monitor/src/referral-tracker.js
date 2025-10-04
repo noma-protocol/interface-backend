@@ -1,7 +1,12 @@
 import { ethers } from 'ethers';
 import axios from 'axios';
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import cache from './cache.js';
 import { getMonPriceService } from './mon-price.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ExchangeHelper contract address and ABI
 const EXCHANGE_HELPER_ADDRESS = process.env.EXCHANGE_HELPER_ADDRESS || '0xD82D7Bdd614bA07527351DE627C558Adbd0f7caE';
@@ -14,20 +19,6 @@ const EXCHANGE_HELPER_ABI = [
   'event SoldTokensWETH(address who, uint256 amount)'
 ];
 
-// Token info for price calculations and referral tracking
-const TOKEN_INFO = {
-  '0x46c7c9b2c22e95e9b304cfcec7cf912b16faaefc': {
-    symbol: 'BUN',
-    decimals: 18,
-    poolAddress: '0x90666407c841fe58358F3ed04a245c5F5bd6fD0A'
-  },
-  '0xccef72e0954e686098dd0db616a16d22e83a6b2f': {
-    symbol: 'AVO',
-    decimals: 18,
-    poolAddress: '0x8Eb5C457F7a29554536Dc964B3FaDA2961Dd8212'
-  }
-};
-
 // WMON address on MoveVM
 const WMON_ADDRESS = '0x0000000000000000000000000000000000000000';
 
@@ -37,17 +28,23 @@ export class ReferralTracker {
     this.referralStore = referralStore;
     this.httpApiUrl = httpApiUrl;
     this.processedTxHashes = new Set();
-    
+
     // Initialize MON price service
     this.monPriceService = getMonPriceService(provider);
     this.monPriceUSD = 0.10; // Default MON price in USD (fallback)
     this.lastPriceUpdate = 0;
-    
+
     // Create ExchangeHelper contract instance
     this.exchangeHelper = null;
+
+    // Pool info loaded from data/pools.json
+    this.poolInfo = {};
   }
 
   async initialize() {
+    // Load pool info from data/pools.json
+    await this.loadPoolInfo();
+
     // Initialize ExchangeHelper contract
     if (EXCHANGE_HELPER_ADDRESS && EXCHANGE_HELPER_ADDRESS !== ethers.ZeroAddress) {
       this.exchangeHelper = new ethers.Contract(
@@ -59,15 +56,42 @@ export class ReferralTracker {
     } else {
       console.warn('ReferralTracker: No ExchangeHelper address configured');
     }
-    
+
     // Fetch initial MON price
     try {
       this.monPriceUSD = await this.monPriceService.getMonPrice();
     } catch (error) {
       console.error('Failed to fetch MON price, using default:', error.message);
     }
-    
+
     console.log(`ReferralTracker initialized with MON price: $${this.monPriceUSD.toFixed(4)}`);
+    console.log(`ReferralTracker loaded ${Object.keys(this.poolInfo).length} pools`);
+  }
+
+  async loadPoolInfo() {
+    try {
+      const poolsPath = path.join(__dirname, '..', 'data', 'pools.json');
+      const poolsData = await fs.readFile(poolsPath, 'utf-8');
+      const parsed = JSON.parse(poolsData);
+
+      // Build poolInfo map: poolAddress -> { symbol, decimals, token0, token1 }
+      for (const pool of parsed.pools || []) {
+        if (pool.enabled !== false) {
+          this.poolInfo[pool.address.toLowerCase()] = {
+            symbol: pool.token0.symbol,
+            decimals: pool.token0.decimals,
+            token0: pool.token0.address.toLowerCase(),
+            token1: pool.token1.address.toLowerCase(),
+            name: pool.name
+          };
+        }
+      }
+
+      console.log(`[ReferralTracker] Loaded ${Object.keys(this.poolInfo).length} enabled pools`);
+    } catch (error) {
+      console.error('[ReferralTracker] Error loading pools.json:', error);
+      this.poolInfo = {};
+    }
   }
 
   // Main method to track ExchangeHelper events
@@ -155,32 +179,29 @@ export class ReferralTracker {
     try {
       // Get transaction receipt to analyze the logs
       let receipt = await cache.getTransaction(txHash + '_receipt');
-      
+
       if (!receipt) {
         receipt = await this.provider.getTransactionReceipt(txHash);
         cache.setTransaction(txHash + '_receipt', receipt);
       }
-      
+
       // Look for Swap events in the logs to determine which pool was used
       for (const log of receipt.logs) {
         // Check if this is a Swap event (topic0 matches Swap event signature)
         const swapEventSignature = ethers.id('Swap(address,address,int256,int256,uint160,uint128,int24)');
-        
+
         if (log.topics[0] === swapEventSignature) {
           // This is a Swap event, the address is the pool
-          const poolAddress = log.address;
-          
+          const poolAddress = log.address.toLowerCase();
+
           // Verify this pool is one we track
-          const tokenEntry = Object.entries(TOKEN_INFO).find(([, info]) => 
-            info.poolAddress.toLowerCase() === poolAddress.toLowerCase()
-          );
-          
-          if (tokenEntry) {
+          if (this.poolInfo[poolAddress]) {
+            console.log(`[ReferralTracker] Found tracked pool: ${this.poolInfo[poolAddress].name} (${poolAddress})`);
             return poolAddress;
           }
         }
       }
-      
+
       return null;
     } catch (error) {
       console.error('Error determining pool from transaction:', error);
@@ -190,17 +211,13 @@ export class ReferralTracker {
 
   async calculateTradeVolumeFromExchangeHelper(eventName, amount, poolAddress) {
     try {
-      // Find token info based on pool address
-      const tokenEntry = Object.entries(TOKEN_INFO).find(([, info]) => 
-        info.poolAddress.toLowerCase() === poolAddress.toLowerCase()
-      );
-      
-      if (!tokenEntry) {
+      // Find pool info based on pool address
+      const poolInfoEntry = this.poolInfo[poolAddress.toLowerCase()];
+
+      if (!poolInfoEntry) {
         console.warn(`Unknown pool in ExchangeHelper trade: ${poolAddress}`);
         return null;
       }
-      
-      const [tokenAddress, tokenInfo] = tokenEntry;
       
       // Determine trade type based on event name
       let type;
@@ -229,8 +246,8 @@ export class ReferralTracker {
       return {
         volumeMON,
         volumeUSD,
-        tokenAddress,
-        tokenSymbol: tokenInfo.symbol,
+        tokenAddress: poolInfoEntry.token0, // The traded token
+        tokenSymbol: poolInfoEntry.symbol,
         type
       };
       
