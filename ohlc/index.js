@@ -31,7 +31,9 @@ const isLocalChain = process.env.CHAIN === "local";
 const providerUrl = isLocalChain ? "http://localhost:8545" : (process.env.RPC_URL || "https://rpc.ankr.com/monad_testnet");
 const wsProviderUrl = process.env.WS_RPC_URL || (isLocalChain ? "ws://localhost:8545" : "wss://monad-testnet.rpc.ankr.com/ws");
 // Removed hardcoded default pool - pool parameter is now required for all endpoints
-const dataFilePath = isLocalChain ? "./priceData_local.json" : "./priceData.json";
+const dataFilePath = isLocalChain
+  ? path.join(__dirname, "priceData_local.json")
+  : path.join(__dirname, "priceData.json");
 const PORT = process.env.PORT || 3001;
 const WS_PORT = process.env.WS_PORT || 3002; // Separate port for WebSocket server
 const USE_WEBSOCKET = process.env.USE_WEBSOCKET === 'true' || false; // Enable WebSocket via env variable
