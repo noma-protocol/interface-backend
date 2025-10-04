@@ -30,10 +30,10 @@ export class HTTPServer {
       await this.referralStore.initialize();
       console.log('HTTP server referral store initialized');
     }
-    
-    // Load tokens from blockchain-monitor/data/tokens.json
+
+    // Load tokens from shared data/tokens.json
     try {
-      const tokensPath = path.join(__dirname, '..', 'data', 'tokens.json');
+      const tokensPath = path.join(__dirname, '..', '..', 'data', 'tokens.json');
       const tokensData = await fs.readFile(tokensPath, 'utf-8');
       const parsed = JSON.parse(tokensData);
       this.tokens = parsed.tokens || [];
@@ -464,7 +464,7 @@ export class HTTPServer {
 
   async saveTokens() {
     try {
-      const tokensPath = path.join(__dirname, '..', 'data', 'tokens.json');
+      const tokensPath = path.join(__dirname, '..', '..', 'data', 'tokens.json');
       await fs.writeFile(tokensPath, JSON.stringify({ tokens: this.tokens }, null, 2));
     } catch (error) {
       console.error('Error saving tokens:', error);
