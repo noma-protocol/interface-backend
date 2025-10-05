@@ -84,6 +84,7 @@ export class ReferralTracker {
             token1: pool.token1.address.toLowerCase(),
             name: pool.name
           };
+          console.log(`[ReferralTracker] Loaded pool: ${pool.name} (${pool.address.toLowerCase()})`);
         }
       }
 
