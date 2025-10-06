@@ -253,8 +253,8 @@ export class HTTPServer {
     this.app.get('/vaults', async (req, res) => {
       const startTime = Date.now();
 
-      // Add timeout promise
-      const timeout = 30000; // 30 seconds
+      // Add timeout promise - 5 minutes for first fetch, subsequent requests use cache
+      const timeout = 300000; // 5 minutes
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Request timeout')), timeout)
       );

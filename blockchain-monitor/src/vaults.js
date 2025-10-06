@@ -64,8 +64,8 @@ export class VaultService {
       if (!deployers) {
         // Cache miss - fetch from contract
         deployers = await this.nomaFactoryContract.getDeployers();
-        // Cache for 5 minutes
-        cache.setContractState(NomaFactoryAddress, 'getDeployers', [], deployers, 300);
+        // Cache permanently - deployer list is immutable
+        cache.setContractState(NomaFactoryAddress, 'getDeployers', [], deployers, 0);
       }
       
       console.log(`Found ${deployers.length} deployers`);
@@ -82,8 +82,8 @@ export class VaultService {
             await new Promise(resolve => setTimeout(resolve, 100));
             // Cache miss - fetch from contract
             vaults = await this.nomaFactoryContract.getVaults(deployer);
-            // Cache for 5 minutes
-            cache.setContractState(NomaFactoryAddress, 'getVaults', [deployer], vaults, 300);
+            // Cache permanently - vault addresses are immutable
+            cache.setContractState(NomaFactoryAddress, 'getVaults', [deployer], vaults, 0);
           }
           
           allVaultAddresses.push(...vaults);
@@ -107,8 +107,8 @@ export class VaultService {
         }
       }
 
-      // Cache the complete vault list for 5 minutes
-      cache.setContractState('VaultService', 'allVaults', [], vaultInfos, 300);
+      // Cache the complete vault list for 1 hour (contains mutable metrics)
+      cache.setContractState('VaultService', 'allVaults', [], vaultInfos, 3600);
       
       return vaultInfos;
     } catch (error) {
@@ -127,8 +127,8 @@ export class VaultService {
         await new Promise(resolve => setTimeout(resolve, 100));
         // Cache miss - fetch from contract
         description = await this.nomaFactoryContract.getVaultDescription(vaultAddress);
-        // Cache for 5 minutes  
-        cache.setContractState(NomaFactoryAddress, 'getVaultDescription', [vaultAddress], description, 300);
+        // Cache permanently - descriptive data is immutable
+        cache.setContractState(NomaFactoryAddress, 'getVaultDescription', [vaultAddress], description, 0);
       }
       
       // Check if description is undefined or null
@@ -384,13 +384,13 @@ export class VaultService {
         totalInterest: vaultInfoData.totalInterest
       };
       
-      // Cache the complete vault info permanently since vault data doesn't change
+      // Cache for 5 minutes - contains mutable vault metrics
       cache.setContractState(
         'VaultManager',
         'getCompleteVaultInfo',
         [vaultAddress],
         completeVaultInfo,
-        0 // Permanent cache
+        300
       );
       
       return completeVaultInfo;
@@ -419,8 +419,8 @@ export class VaultService {
         // Fetch VaultInfo struct from getVaultInfo() method
         vaultInfo = await vaultContract.getVaultInfo();
 
-        // Cache for 1 minute (vault info changes more frequently)
-        cache.setContractState(vaultAddress, 'getVaultInfo', [], vaultInfo, 60);
+        // Cache for 5 minutes (vault metrics change over time)
+        cache.setContractState(vaultAddress, 'getVaultInfo', [], vaultInfo, 300);
       }
       
       // Check if vaultInfo is undefined or null
