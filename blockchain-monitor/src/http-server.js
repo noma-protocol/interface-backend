@@ -473,7 +473,7 @@ export class HTTPServer {
     // ===== Loan History Endpoints =====
 
     // Get latest loan events
-    this.app.get('/loans/latest', (req, res) => {
+    this.app.get('/api/loans/latest', (req, res) => {
       try {
         if (!this.loanStorage) {
           return res.status(503).json({ error: 'Loan monitoring not enabled' });
@@ -493,7 +493,7 @@ export class HTTPServer {
     });
 
     // Get loan events by user address
-    this.app.get('/loans/user/:address', (req, res) => {
+    this.app.get('/api/loans/user/:address', (req, res) => {
       try {
         if (!this.loanStorage) {
           return res.status(503).json({ error: 'Loan monitoring not enabled' });
@@ -514,7 +514,7 @@ export class HTTPServer {
     });
 
     // Get loan events by vault address
-    this.app.get('/loans/vault/:address', (req, res) => {
+    this.app.get('/api/loans/vault/:address', (req, res) => {
       try {
         if (!this.loanStorage) {
           return res.status(503).json({ error: 'Loan monitoring not enabled' });
@@ -535,7 +535,7 @@ export class HTTPServer {
     });
 
     // Get loan statistics by user
-    this.app.get('/loans/stats/user/:address', (req, res) => {
+    this.app.get('/api/loans/stats/user/:address', (req, res) => {
       try {
         if (!this.loanStorage) {
           return res.status(503).json({ error: 'Loan monitoring not enabled' });
@@ -552,7 +552,7 @@ export class HTTPServer {
     });
 
     // Get loan statistics by vault
-    this.app.get('/loans/stats/vault/:address', (req, res) => {
+    this.app.get('/api/loans/stats/vault/:address', (req, res) => {
       try {
         if (!this.loanStorage) {
           return res.status(503).json({ error: 'Loan monitoring not enabled' });
@@ -569,7 +569,7 @@ export class HTTPServer {
     });
 
     // Get loans by type (Borrow, Payback, RollLoan, DefaultLoans)
-    this.app.get('/loans/type/:type', (req, res) => {
+    this.app.get('/api/loans/type/:type', (req, res) => {
       try {
         if (!this.loanStorage) {
           return res.status(503).json({ error: 'Loan monitoring not enabled' });

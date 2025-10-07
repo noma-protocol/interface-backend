@@ -17,14 +17,6 @@ try {
   ExtVaultABI = [];
 }
 
-// Extract loan-related events from ABI
-const LOAN_EVENTS = [
-  "event Borrow(address indexed who, uint256 borrowAmount, uint256 duration)",
-  "event Payback(address indexed who)",
-  "event RollLoan(address indexed who)",
-  "event DefaultLoans()"
-];
-
 /**
  * LoanMonitor - Monitors lending vault events (Borrow, Payback, RollLoan, DefaultLoans)
  *
@@ -54,9 +46,9 @@ export class LoanMonitor extends EventEmitter {
   async initialize() {
     console.log(`Initializing LoanMonitor for ${this.vaultAddresses.length} vaults...`);
 
-    // Create contract instances for each vault
+    // Create contract instances for each vault using the full ABI
     for (const vaultAddress of this.vaultAddresses) {
-      const contract = new ethers.Contract(vaultAddress, LOAN_EVENTS, this.provider);
+      const contract = new ethers.Contract(vaultAddress, ExtVaultABI, this.provider);
       this.vaultContracts.set(vaultAddress.toLowerCase(), contract);
     }
 

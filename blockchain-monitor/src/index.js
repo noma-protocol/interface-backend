@@ -45,26 +45,45 @@ async function loadPools() {
   }
 }
 
-async function loadVaults() {
+async function loadVaults(rpcUrl) {
   try {
-    // Check if vault addresses are configured
+    // Import VaultService dynamically
+    const { VaultService } = await import('./vaults.js');
+    const vaultService = new VaultService(rpcUrl);
+
+    console.log('Loading vaults from blockchain...');
+    const allVaults = await vaultService.getAllVaults();
+
+    if (allVaults.length === 0) {
+      console.log('No vaults found on blockchain');
+      return [];
+    }
+
+    console.log(`Found ${allVaults.length} vaults for loan monitoring`);
+
+    // Map vault info to the format needed by LoanMonitor
+    return allVaults.map(vault => ({
+      address: vault.vaultAddress,
+      tokenSymbol: vault.tokenSymbol || 'VAULT',
+      tokenName: vault.tokenName || 'Lending Vault'
+    }));
+  } catch (error) {
+    console.error('Failed to load vaults:', error.message);
+
+    // Fallback to env var if API fails
     const vaultAddresses = process.env.VAULT_ADDRESSES
       ? process.env.VAULT_ADDRESSES.split(',').map(addr => addr.trim())
       : [];
 
-    if (vaultAddresses.length === 0) {
-      console.log('No vault addresses configured for loan monitoring');
-      return [];
+    if (vaultAddresses.length > 0) {
+      console.log(`Using ${vaultAddresses.length} vaults from VAULT_ADDRESSES env var`);
+      return vaultAddresses.map(address => ({
+        address,
+        tokenSymbol: 'VAULT',
+        tokenName: 'Lending Vault'
+      }));
     }
 
-    // Build vault metadata (can be extended to load from file if needed)
-    return vaultAddresses.map(address => ({
-      address,
-      tokenSymbol: 'VAULT', // Placeholder, can be loaded from contract
-      tokenName: 'Lending Vault'
-    }));
-  } catch (error) {
-    console.error('Failed to load vaults:', error.message);
     return [];
   }
 }
@@ -93,7 +112,7 @@ async function main() {
       ? process.env.POOL_ADDRESSES.split(',').map(addr => addr.trim())
       : pools.map(p => p.address);
 
-    const vaults = await loadVaults();
+    const vaults = await loadVaults(rpcUrl);
     const vaultAddresses = vaults.map(v => v.address);
 
     console.log('Initializing services...');
