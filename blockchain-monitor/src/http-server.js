@@ -8,6 +8,14 @@ import { VaultService } from './vaults.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Helper function to convert BigInt to string in nested objects
+function bigIntReplacer(key, value) {
+  if (typeof value === 'bigint') {
+    return value.toString();
+  }
+  return value;
+}
+
 export class HTTPServer {
   constructor(port = 3004, referralStore = null, rpcUrl = null, loanStorage = null) {
     this.port = port;
@@ -482,10 +490,11 @@ export class HTTPServer {
         const limit = parseInt(req.query.limit) || 100;
         const loans = this.loanStorage.getLatestLoans(limit);
 
-        res.json({
+        res.setHeader('Content-Type', 'application/json');
+        res.send(JSON.stringify({
           loans,
           count: loans.length
-        });
+        }, bigIntReplacer));
       } catch (error) {
         console.error('Error fetching latest loans:', error);
         res.status(500).json({ error: 'Failed to retrieve loan history' });
@@ -502,11 +511,12 @@ export class HTTPServer {
         const { address } = req.params;
         const loans = this.loanStorage.getLoansByUser(address);
 
-        res.json({
+        res.setHeader('Content-Type', 'application/json');
+        res.send(JSON.stringify({
           userAddress: address,
           loans,
           count: loans.length
-        });
+        }, bigIntReplacer));
       } catch (error) {
         console.error('Error fetching loans by user:', error);
         res.status(500).json({ error: 'Failed to retrieve user loan history' });
@@ -523,11 +533,12 @@ export class HTTPServer {
         const { address } = req.params;
         const loans = this.loanStorage.getLoansByVault(address);
 
-        res.json({
+        res.setHeader('Content-Type', 'application/json');
+        res.send(JSON.stringify({
           vaultAddress: address,
           loans,
           count: loans.length
-        });
+        }, bigIntReplacer));
       } catch (error) {
         console.error('Error fetching loans by vault:', error);
         res.status(500).json({ error: 'Failed to retrieve vault loan history' });
@@ -544,7 +555,8 @@ export class HTTPServer {
         const { address } = req.params;
         const stats = this.loanStorage.getLoanStatsByUser(address);
 
-        res.json(stats);
+        res.setHeader('Content-Type', 'application/json');
+        res.send(JSON.stringify(stats, bigIntReplacer));
       } catch (error) {
         console.error('Error fetching user loan stats:', error);
         res.status(500).json({ error: 'Failed to retrieve user loan statistics' });
@@ -561,7 +573,8 @@ export class HTTPServer {
         const { address } = req.params;
         const stats = this.loanStorage.getLoanStatsByVault(address);
 
-        res.json(stats);
+        res.setHeader('Content-Type', 'application/json');
+        res.send(JSON.stringify(stats, bigIntReplacer));
       } catch (error) {
         console.error('Error fetching vault loan stats:', error);
         res.status(500).json({ error: 'Failed to retrieve vault loan statistics' });
@@ -587,11 +600,12 @@ export class HTTPServer {
 
         const loans = this.loanStorage.getLoansByType(type);
 
-        res.json({
+        res.setHeader('Content-Type', 'application/json');
+        res.send(JSON.stringify({
           type,
           loans,
           count: loans.length
-        });
+        }, bigIntReplacer));
       } catch (error) {
         console.error('Error fetching loans by type:', error);
         res.status(500).json({ error: 'Failed to retrieve loans by type' });

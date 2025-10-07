@@ -75,6 +75,8 @@ export class LoanMonitor extends EventEmitter {
   }
 
   async setupWebSocketListeners() {
+    console.log(`Setting up loan event listeners for ${this.vaultContracts.size} vaults...`);
+
     for (const [vaultAddress, contract] of this.vaultContracts) {
       // Listen for Borrow events
       contract.on('Borrow', async (who, borrowAmount, duration, event) => {
@@ -104,22 +106,27 @@ export class LoanMonitor extends EventEmitter {
         await this.handleLoanEvent('DefaultLoans', vaultAddress, event, {});
       });
 
-      console.log(`Loan event listeners registered for vault: ${vaultAddress}`);
+      console.log(`📋 Vault ${vaultAddress}: Listening for Borrow, Payback, RollLoan, DefaultLoans events`);
     }
+
+    console.log(`✅ All loan event listeners registered successfully`);
   }
 
   async handleLoanEvent(eventName, vaultAddress, event, parsedArgs) {
     try {
       this.lastBlockUpdateTime = Date.now();
 
+      // Handle both real-time events (event.log exists) and wrapped events ({ log: event })
+      const log = event.log || event;
+
       const loanEvent = {
         vaultAddress,
         eventName,
-        blockNumber: event.log.blockNumber,
-        blockHash: event.log.blockHash,
-        transactionHash: event.log.transactionHash,
-        transactionIndex: event.log.transactionIndex,
-        logIndex: event.log.index,
+        blockNumber: log.blockNumber,
+        blockHash: log.blockHash,
+        transactionHash: log.transactionHash,
+        transactionIndex: log.transactionIndex,
+        logIndex: log.index,
         args: parsedArgs,
         timestamp: Date.now()
       };
@@ -155,68 +162,79 @@ export class LoanMonitor extends EventEmitter {
   async scanHistoricalBlocks(hoursBack = 24) {
     const currentBlock = await this.provider.getBlockNumber();
     const blocksBack = Math.floor((hoursBack * 60 * 60) / 1); // Assuming 1 second per block
-    const startBlock = Math.max(0, currentBlock - blocksBack);
+    const fromBlock = Math.max(0, currentBlock - blocksBack);
 
-    console.log(`\n📚 Scanning ${hoursBack} hours of loan events (blocks ${startBlock} to ${currentBlock})...`);
+    console.log(`\n📚 Scanning ${hoursBack} hours of loan events (blocks ${fromBlock} to ${currentBlock})...`);
+    console.log(`   Estimated ${blocksBack} blocks to scan across ${this.vaultContracts.size} vaults`);
 
     let totalEvents = 0;
+    const maxBlockRange = 1000; // RPC provider limit
 
-    for (const [vaultAddress, contract] of this.vaultContracts) {
-      try {
-        // Create filters for each event type
-        const borrowFilter = contract.filters.Borrow();
-        const paybackFilter = contract.filters.Payback();
-        const rollLoanFilter = contract.filters.RollLoan();
-        const defaultLoansFilter = contract.filters.DefaultLoans();
+    // Scan in chunks of 1000 blocks
+    for (let startBlock = fromBlock; startBlock <= currentBlock; startBlock += maxBlockRange) {
+      const endBlock = Math.min(startBlock + maxBlockRange - 1, currentBlock);
+      const progress = Math.round(((startBlock - fromBlock) / blocksBack) * 100);
 
-        // Query all event types in parallel
-        const [borrowEvents, paybackEvents, rollLoanEvents, defaultLoansEvents] = await Promise.all([
-          contract.queryFilter(borrowFilter, startBlock, currentBlock),
-          contract.queryFilter(paybackFilter, startBlock, currentBlock),
-          contract.queryFilter(rollLoanFilter, startBlock, currentBlock),
-          contract.queryFilter(defaultLoansFilter, startBlock, currentBlock)
-        ]);
+      console.log(`   Progress: ${progress}% - Scanning blocks ${startBlock} to ${endBlock}...`);
 
-        // Process Borrow events
-        for (const event of borrowEvents) {
-          const parsedLog = event.args;
-          await this.handleLoanEvent('Borrow', vaultAddress, { log: event }, {
-            who: parsedLog.who,
-            borrowAmount: parsedLog.borrowAmount.toString(),
-            duration: parsedLog.duration.toString()
-          });
-          totalEvents++;
+      for (const [vaultAddress, contract] of this.vaultContracts) {
+        try {
+          // Create filters for each event type
+          const borrowFilter = contract.filters.Borrow();
+          const paybackFilter = contract.filters.Payback();
+          const rollLoanFilter = contract.filters.RollLoan();
+          const defaultLoansFilter = contract.filters.DefaultLoans();
+
+          // Query all event types in parallel for this chunk
+          const [borrowEvents, paybackEvents, rollLoanEvents, defaultLoansEvents] = await Promise.all([
+            contract.queryFilter(borrowFilter, startBlock, endBlock),
+            contract.queryFilter(paybackFilter, startBlock, endBlock),
+            contract.queryFilter(rollLoanFilter, startBlock, endBlock),
+            contract.queryFilter(defaultLoansFilter, startBlock, endBlock)
+          ]);
+
+          // Process Borrow events
+          for (const event of borrowEvents) {
+            const parsedLog = event.args;
+            await this.handleLoanEvent('Borrow', vaultAddress, { log: event }, {
+              who: parsedLog.who,
+              borrowAmount: parsedLog.borrowAmount.toString(),
+              duration: parsedLog.duration.toString()
+            });
+            totalEvents++;
+          }
+
+          // Process Payback events
+          for (const event of paybackEvents) {
+            const parsedLog = event.args;
+            await this.handleLoanEvent('Payback', vaultAddress, { log: event }, {
+              who: parsedLog.who
+            });
+            totalEvents++;
+          }
+
+          // Process RollLoan events
+          for (const event of rollLoanEvents) {
+            const parsedLog = event.args;
+            await this.handleLoanEvent('RollLoan', vaultAddress, { log: event }, {
+              who: parsedLog.who
+            });
+            totalEvents++;
+          }
+
+          // Process DefaultLoans events
+          for (const event of defaultLoansEvents) {
+            await this.handleLoanEvent('DefaultLoans', vaultAddress, { log: event }, {});
+            totalEvents++;
+          }
+
+          const chunkTotal = borrowEvents.length + paybackEvents.length + rollLoanEvents.length + defaultLoansEvents.length;
+          if (chunkTotal > 0) {
+            console.log(`      Vault ${vaultAddress.substring(0, 8)}...: Found ${chunkTotal} events (Borrow: ${borrowEvents.length}, Payback: ${paybackEvents.length}, Roll: ${rollLoanEvents.length}, Default: ${defaultLoansEvents.length})`);
+          }
+        } catch (error) {
+          console.error(`   Error scanning vault ${vaultAddress}:`, error.message);
         }
-
-        // Process Payback events
-        for (const event of paybackEvents) {
-          const parsedLog = event.args;
-          await this.handleLoanEvent('Payback', vaultAddress, { log: event }, {
-            who: parsedLog.who
-          });
-          totalEvents++;
-        }
-
-        // Process RollLoan events
-        for (const event of rollLoanEvents) {
-          const parsedLog = event.args;
-          await this.handleLoanEvent('RollLoan', vaultAddress, { log: event }, {
-            who: parsedLog.who
-          });
-          totalEvents++;
-        }
-
-        // Process DefaultLoans events
-        for (const event of defaultLoansEvents) {
-          await this.handleLoanEvent('DefaultLoans', vaultAddress, { log: event }, {});
-          totalEvents++;
-        }
-
-        if (borrowEvents.length + paybackEvents.length + rollLoanEvents.length + defaultLoansEvents.length > 0) {
-          console.log(`   Found ${borrowEvents.length + paybackEvents.length + rollLoanEvents.length + defaultLoansEvents.length} loan events for vault ${vaultAddress}`);
-        }
-      } catch (error) {
-        console.error(`Error scanning historical loan events for vault ${vaultAddress}:`, error);
       }
     }
 
