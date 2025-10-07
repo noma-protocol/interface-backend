@@ -432,6 +432,23 @@ export class WSServer extends EventEmitter {
         await this.handleGetGlobalTrades(client, data);
         break;
 
+      // Loan history message types
+      case 'getLatestLoans':
+        await this.handleGetLatestLoans(client, data);
+        break;
+
+      case 'getLoansByUser':
+        await this.handleGetLoansByUser(client, data);
+        break;
+
+      case 'getLoansByVault':
+        await this.handleGetLoansByVault(client, data);
+        break;
+
+      case 'getLoanStats':
+        await this.handleGetLoanStats(client, data);
+        break;
+
       // Trollbox message types
       case 'message':
         await this.handleChatMessage(client, data);
@@ -778,28 +795,152 @@ export class WSServer extends EventEmitter {
   broadcastEvent(event) {
     for (const [clientId, client] of this.clients) {
       // Broadcast to all connected clients, not just authenticated ones
-      
+
       // For ExchangeHelper events, there's no poolAddress
       // For Uniswap events, check pool subscriptions
       if (event.poolAddress) {
         const normalizedEventPool = event.poolAddress.toLowerCase();
-        
+
         // If client has no specific subscriptions, they get ALL events
         // Otherwise, check if they're subscribed to this specific pool
         const isSubscribedToAll = client.pools.length === 0;
         const isSubscribedToThisPool = client.pools.includes(normalizedEventPool);
-        
+
         if (!isSubscribedToAll && !isSubscribedToThisPool) {
           continue;
         }
       }
-      
+
       if (client.ws.readyState === 1) {
         client.ws.send(JSON.stringify({
           type: 'event',
           data: event
         }, bigIntReplacer));
       }
+    }
+  }
+
+  broadcastLoanEvent(loanEvent) {
+    for (const [clientId, client] of this.clients) {
+      // Broadcast loan events to all connected clients
+      // Could add vault-specific filtering similar to pool subscriptions if needed
+
+      if (client.ws.readyState === 1) {
+        client.ws.send(JSON.stringify({
+          type: 'loanEvent',
+          data: loanEvent
+        }, bigIntReplacer));
+      }
+    }
+  }
+
+  async handleGetLatestLoans(client, data) {
+    if (!this.loanStorage) {
+      client.ws.send(JSON.stringify({
+        type: 'latestLoans',
+        loans: [],
+        count: 0,
+        error: 'Loan monitoring not enabled'
+      }));
+      return;
+    }
+
+    const { limit = 100 } = data;
+    const loans = this.loanStorage.getLatestLoans(limit);
+
+    client.ws.send(JSON.stringify({
+      type: 'latestLoans',
+      loans,
+      count: loans.length
+    }, bigIntReplacer));
+  }
+
+  async handleGetLoansByUser(client, data) {
+    if (!this.loanStorage) {
+      client.ws.send(JSON.stringify({
+        type: 'loansByUser',
+        loans: [],
+        error: 'Loan monitoring not enabled'
+      }));
+      return;
+    }
+
+    const { userAddress } = data;
+    if (!userAddress) {
+      client.ws.send(JSON.stringify({
+        type: 'loansByUser',
+        error: 'Missing userAddress parameter'
+      }));
+      return;
+    }
+
+    const loans = this.loanStorage.getLoansByUser(userAddress);
+
+    client.ws.send(JSON.stringify({
+      type: 'loansByUser',
+      userAddress,
+      loans,
+      count: loans.length
+    }, bigIntReplacer));
+  }
+
+  async handleGetLoansByVault(client, data) {
+    if (!this.loanStorage) {
+      client.ws.send(JSON.stringify({
+        type: 'loansByVault',
+        loans: [],
+        error: 'Loan monitoring not enabled'
+      }));
+      return;
+    }
+
+    const { vaultAddress } = data;
+    if (!vaultAddress) {
+      client.ws.send(JSON.stringify({
+        type: 'loansByVault',
+        error: 'Missing vaultAddress parameter'
+      }));
+      return;
+    }
+
+    const loans = this.loanStorage.getLoansByVault(vaultAddress);
+
+    client.ws.send(JSON.stringify({
+      type: 'loansByVault',
+      vaultAddress,
+      loans,
+      count: loans.length
+    }, bigIntReplacer));
+  }
+
+  async handleGetLoanStats(client, data) {
+    if (!this.loanStorage) {
+      client.ws.send(JSON.stringify({
+        type: 'loanStats',
+        error: 'Loan monitoring not enabled'
+      }));
+      return;
+    }
+
+    const { userAddress, vaultAddress } = data;
+
+    if (userAddress) {
+      const stats = this.loanStorage.getLoanStatsByUser(userAddress);
+      client.ws.send(JSON.stringify({
+        type: 'loanStats',
+        stats
+      }, bigIntReplacer));
+    } else if (vaultAddress) {
+      const stats = this.loanStorage.getLoanStatsByVault(vaultAddress);
+      client.ws.send(JSON.stringify({
+        type: 'loanStats',
+        stats
+      }, bigIntReplacer));
+    } else {
+      client.ws.send(JSON.stringify({
+        type: 'loanStats',
+        error: 'Missing userAddress or vaultAddress parameter'
+      }));
     }
   }
 

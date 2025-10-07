@@ -9,17 +9,18 @@ import { VaultService } from './vaults.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export class HTTPServer {
-  constructor(port = 3004, referralStore = null, rpcUrl = null) {
+  constructor(port = 3004, referralStore = null, rpcUrl = null, loanStorage = null) {
     this.port = port;
     this.app = express();
     this.referralStore = referralStore || new ReferralStore();
     this.vaultService = rpcUrl ? new VaultService(rpcUrl) : null;
+    this.loanStorage = loanStorage;
     this.tokens = [];
-    
+
     // Middleware
     this.app.use(cors());
     this.app.use(express.json());
-    
+
     // Setup routes
     this.setupRoutes();
   }
@@ -466,6 +467,134 @@ export class HTTPServer {
       } catch (error) {
         console.error('Error fetching token stats:', error);
         res.status(500).json({ error: 'Failed to get statistics' });
+      }
+    });
+
+    // ===== Loan History Endpoints =====
+
+    // Get latest loan events
+    this.app.get('/api/loans/latest', (req, res) => {
+      try {
+        if (!this.loanStorage) {
+          return res.status(503).json({ error: 'Loan monitoring not enabled' });
+        }
+
+        const limit = parseInt(req.query.limit) || 100;
+        const loans = this.loanStorage.getLatestLoans(limit);
+
+        res.json({
+          loans,
+          count: loans.length
+        });
+      } catch (error) {
+        console.error('Error fetching latest loans:', error);
+        res.status(500).json({ error: 'Failed to retrieve loan history' });
+      }
+    });
+
+    // Get loan events by user address
+    this.app.get('/api/loans/user/:address', (req, res) => {
+      try {
+        if (!this.loanStorage) {
+          return res.status(503).json({ error: 'Loan monitoring not enabled' });
+        }
+
+        const { address } = req.params;
+        const loans = this.loanStorage.getLoansByUser(address);
+
+        res.json({
+          userAddress: address,
+          loans,
+          count: loans.length
+        });
+      } catch (error) {
+        console.error('Error fetching loans by user:', error);
+        res.status(500).json({ error: 'Failed to retrieve user loan history' });
+      }
+    });
+
+    // Get loan events by vault address
+    this.app.get('/api/loans/vault/:address', (req, res) => {
+      try {
+        if (!this.loanStorage) {
+          return res.status(503).json({ error: 'Loan monitoring not enabled' });
+        }
+
+        const { address } = req.params;
+        const loans = this.loanStorage.getLoansByVault(address);
+
+        res.json({
+          vaultAddress: address,
+          loans,
+          count: loans.length
+        });
+      } catch (error) {
+        console.error('Error fetching loans by vault:', error);
+        res.status(500).json({ error: 'Failed to retrieve vault loan history' });
+      }
+    });
+
+    // Get loan statistics by user
+    this.app.get('/api/loans/stats/user/:address', (req, res) => {
+      try {
+        if (!this.loanStorage) {
+          return res.status(503).json({ error: 'Loan monitoring not enabled' });
+        }
+
+        const { address } = req.params;
+        const stats = this.loanStorage.getLoanStatsByUser(address);
+
+        res.json(stats);
+      } catch (error) {
+        console.error('Error fetching user loan stats:', error);
+        res.status(500).json({ error: 'Failed to retrieve user loan statistics' });
+      }
+    });
+
+    // Get loan statistics by vault
+    this.app.get('/api/loans/stats/vault/:address', (req, res) => {
+      try {
+        if (!this.loanStorage) {
+          return res.status(503).json({ error: 'Loan monitoring not enabled' });
+        }
+
+        const { address } = req.params;
+        const stats = this.loanStorage.getLoanStatsByVault(address);
+
+        res.json(stats);
+      } catch (error) {
+        console.error('Error fetching vault loan stats:', error);
+        res.status(500).json({ error: 'Failed to retrieve vault loan statistics' });
+      }
+    });
+
+    // Get loans by type (Borrow, Payback, RollLoan, DefaultLoans)
+    this.app.get('/api/loans/type/:type', (req, res) => {
+      try {
+        if (!this.loanStorage) {
+          return res.status(503).json({ error: 'Loan monitoring not enabled' });
+        }
+
+        const { type } = req.params;
+        const validTypes = ['Borrow', 'Payback', 'RollLoan', 'DefaultLoans'];
+
+        if (!validTypes.includes(type)) {
+          return res.status(400).json({
+            error: 'Invalid loan type',
+            validTypes
+          });
+        }
+
+        const loans = this.loanStorage.getLoansByType(type);
+
+        res.json({
+          type,
+          loans,
+          count: loans.length
+        });
+      } catch (error) {
+        console.error('Error fetching loans by type:', error);
+        res.status(500).json({ error: 'Failed to retrieve loans by type' });
       }
     });
   }

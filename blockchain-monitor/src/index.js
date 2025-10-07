@@ -4,6 +4,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { BlockchainMonitor } from './blockchain-monitor.js';
 import { EventStorage } from './event-storage.js';
+import { LoanMonitor } from './loan-monitor.js';
+import { LoanStorage } from './loan-storage.js';
 import { WSServer } from './websocket-server.js';
 import { AuthManager } from './auth-manager.js';
 import { ReferralStore } from './referral-store.js';
@@ -43,6 +45,30 @@ async function loadPools() {
   }
 }
 
+async function loadVaults() {
+  try {
+    // Check if vault addresses are configured
+    const vaultAddresses = process.env.VAULT_ADDRESSES
+      ? process.env.VAULT_ADDRESSES.split(',').map(addr => addr.trim())
+      : [];
+
+    if (vaultAddresses.length === 0) {
+      console.log('No vault addresses configured for loan monitoring');
+      return [];
+    }
+
+    // Build vault metadata (can be extended to load from file if needed)
+    return vaultAddresses.map(address => ({
+      address,
+      tokenSymbol: 'VAULT', // Placeholder, can be loaded from contract
+      tokenName: 'Lending Vault'
+    }));
+  } catch (error) {
+    console.error('Failed to load vaults:', error.message);
+    return [];
+  }
+}
+
 async function main() {
   try {
     console.log('Initializing services...');
@@ -67,6 +93,9 @@ async function main() {
       ? process.env.POOL_ADDRESSES.split(',').map(addr => addr.trim())
       : pools.map(p => p.address);
 
+    const vaults = await loadVaults();
+    const vaultAddresses = vaults.map(v => v.address);
+
     console.log('Initializing services...');
 
     const eventStorage = new EventStorage(historyFilePath, pools);
@@ -75,6 +104,15 @@ async function main() {
     // Clean up any existing duplicates
     console.log('Checking for duplicate events in storage...');
     await eventStorage.removeDuplicates();
+
+    // Initialize loan storage for vault lending events
+    const loanHistoryFilePath = path.join(__dirname, '..', '..', 'data', 'loans-history.json');
+    const loanStorage = new LoanStorage(loanHistoryFilePath, vaults);
+    await loanStorage.initialize();
+
+    // Clean up any existing duplicate loans
+    console.log('Checking for duplicate loan events in storage...');
+    await loanStorage.removeDuplicates();
 
     const authManager = new AuthManager();
 
@@ -92,12 +130,22 @@ async function main() {
     );
     await referralTracker.initialize();
 
-    // Initialize HTTP server for referral API (pass the same referral store and rpcUrl)
-    const httpServer = new HTTPServer(httpPort, referralStore, rpcUrl);
+    // Initialize loan monitor for vault lending events
+    let loanMonitor = null;
+    if (vaultAddresses.length > 0) {
+      loanMonitor = new LoanMonitor(blockchainMonitor.provider, vaultAddresses);
+      await loanMonitor.initialize();
+      console.log(`Loan monitoring enabled for ${vaultAddresses.length} vaults`);
+    }
+
+    // Initialize HTTP server for referral API (pass the same referral store, rpcUrl, and loan storage)
+    const httpServer = new HTTPServer(httpPort, referralStore, rpcUrl, loanStorage);
     await httpServer.initialize();
     httpServer.start();
 
     const wsServer = new WSServer(websocketPort, eventStorage, authManager);
+    // Pass loan storage to WebSocket server for loan event broadcasting
+    wsServer.loanStorage = loanStorage;
 
     blockchainMonitor.on('poolEvent', async (eventData) => {
       console.log(`New ${eventData.eventName} event from pool ${eventData.poolAddress}`);
@@ -127,11 +175,34 @@ async function main() {
       await referralTracker.trackExchangeHelperEvent(eventData);
     });
 
+    // Handle loan events from vaults
+    if (loanMonitor) {
+      loanMonitor.on('loanEvent', async (loanData) => {
+        console.log(`New ${loanData.eventName} event from vault ${loanData.vaultAddress}`);
+
+        // Store the loan event
+        const storedLoan = await loanStorage.addLoan(loanData);
+
+        console.log(`Broadcasting ${loanData.eventName} loan event from vault ${loanData.vaultAddress} with id ${storedLoan.id}`);
+
+        // Broadcast to WebSocket clients
+        wsServer.broadcastLoanEvent(storedLoan);
+      });
+    }
+
     wsServer.start();
     await blockchainMonitor.start();
 
+    // Start loan monitor if configured
+    if (loanMonitor) {
+      await loanMonitor.start();
+    }
+
     console.log('Blockchain monitor started successfully');
     console.log(`Monitoring ${poolAddresses.length} pools`);
+    if (loanMonitor) {
+      console.log(`Monitoring ${vaultAddresses.length} vaults for loan events`);
+    }
     console.log(`WebSocket server running on port ${websocketPort}`);
     console.log(`HTTP referral API running on port ${httpPort}`);
 
@@ -149,6 +220,17 @@ async function main() {
         console.error('Historical scan failed:', error.message);
         console.log('Continuing with normal operation...');
       }
+
+      // Also scan for historical loan events
+      if (loanMonitor) {
+        console.log(`\n📚 Starting historical loan event scan (${historicalScanHours} hours)...`);
+        try {
+          await loanMonitor.scanHistoricalBlocks(historicalScanHours);
+        } catch (error) {
+          console.error('Historical loan scan failed:', error.message);
+          console.log('Continuing with normal operation...');
+        }
+      }
     } else {
       console.log('Historical block scanning disabled (set HISTORICAL_SCAN_HOURS to enable)');
     }
@@ -158,9 +240,10 @@ async function main() {
       const restartMs = autoRestartHours * 60 * 60 * 1000;
       console.log(`\n⏰ Auto-restart enabled: Server will restart after ${autoRestartHours} hour(s)`);
 
-      setTimeout(() => {
+      setTimeout(async () => {
         console.log('\n🔄 Auto-restart triggered - Restarting server...');
-        blockchainMonitor.stop();
+        await blockchainMonitor.stop();
+        if (loanMonitor) await loanMonitor.stop();
         wsServer.stop();
         httpServer.stop();
         // Exit with code 0 so process manager (like PM2) can restart it
@@ -183,6 +266,7 @@ async function main() {
     process.on('SIGINT', async () => {
       console.log('\nShutting down...');
       await blockchainMonitor.stop();
+      if (loanMonitor) await loanMonitor.stop();
       wsServer.stop();
       httpServer.stop();
       process.exit(0);
@@ -191,6 +275,7 @@ async function main() {
     // Cleanup old events daily
     setInterval(async () => {
       await eventStorage.clearOldEvents(30);
+      await loanStorage.clearOldLoans(90); // Keep loan history for 90 days
     }, 24 * 60 * 60 * 1000);
 
     // Cleanup old processed transaction hashes daily (older than 48 hours)
