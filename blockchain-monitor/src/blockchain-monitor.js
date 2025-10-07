@@ -101,16 +101,16 @@ export class BlockchainMonitor extends EventEmitter {
       console.log('Setting up WebSocket event listeners...');
       await this.setupWebSocketListeners();
 
-      // Set up reconnection handler
-      this.provider.on('reconnected', async () => {
+      // Set up reconnection handler using callbacks
+      this.provider.onReconnected = async () => {
         console.log('Provider reconnected, re-establishing event listeners...');
         await this.setupWebSocketListeners();
-      });
+      };
 
-      // Set up disconnection handler
-      this.provider.on('disconnected', () => {
+      // Set up disconnection handler using callbacks
+      this.provider.onDisconnected = () => {
         console.log('Provider disconnected, event listeners will be re-established on reconnection');
-      });
+      };
     }
 
     // Start polling for events (works for both HTTP and WebSocket as backup)

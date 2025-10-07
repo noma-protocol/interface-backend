@@ -40,6 +40,7 @@ export function createProvider(url, network) {
 
     // Mark as WebSocket provider for detection
     provider.isWebSocketProvider = true;
+    provider.wsConnectionState = 'connecting';
 
     // Set up event listeners
     provider.on('error', (error) => {
@@ -57,11 +58,21 @@ export function createProvider(url, network) {
       if (info.action === 'webSocketOpen') {
         console.log('WebSocket connection established');
         reconnectAttempts = 0;
-        // Emit custom event for listeners to re-establish
-        provider.emit('reconnected');
+        const wasDisconnected = provider.wsConnectionState === 'disconnected';
+        provider.wsConnectionState = 'connected';
+
+        // Store reconnection callback
+        if (wasDisconnected && provider.onReconnected) {
+          provider.onReconnected();
+        }
       } else if (info.action === 'webSocketClose') {
         console.log('WebSocket connection closed');
-        provider.emit('disconnected');
+        provider.wsConnectionState = 'disconnected';
+
+        // Store disconnection callback
+        if (provider.onDisconnected) {
+          provider.onDisconnected();
+        }
       }
     });
 
