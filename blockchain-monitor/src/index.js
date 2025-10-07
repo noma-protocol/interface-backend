@@ -164,16 +164,29 @@ async function main() {
     cache.startStatsLogging(60000); // Log every minute
     console.log('Cache statistics logging enabled (every 60 seconds)');
 
+    // Log processed tx stats periodically
+    setInterval(() => {
+      const stats = blockchainMonitor.processedTxTracker.getStats();
+      console.log(`📊 Processed TX Stats - Total: ${stats.total}, Last 24h: ${stats.last24h}, Last 48h: ${stats.last48h}`);
+    }, 10 * 60 * 1000); // Every 10 minutes
+
     process.on('SIGINT', async () => {
       console.log('\nShutting down...');
-      blockchainMonitor.stop();
+      await blockchainMonitor.stop();
       wsServer.stop();
       httpServer.stop();
       process.exit(0);
     });
 
+    // Cleanup old events daily
     setInterval(async () => {
       await eventStorage.clearOldEvents(30);
+    }, 24 * 60 * 60 * 1000);
+
+    // Cleanup old processed transaction hashes daily (older than 48 hours)
+    setInterval(async () => {
+      console.log('Running scheduled cleanup of old processed transaction hashes...');
+      await blockchainMonitor.processedTxTracker.cleanup();
     }, 24 * 60 * 60 * 1000);
 
   } catch (error) {

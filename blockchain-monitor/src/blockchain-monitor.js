@@ -2,6 +2,7 @@ import { ethers } from 'ethers';
 import EventEmitter from 'events';
 import cache from './cache.js';
 import { createProvider, checkProviderConnection } from './provider.js';
+import { ProcessedTxTracker } from './processed-tx-tracker.js';
 
 // Standard Uniswap V3 events
 const UNISWAP_V3_ABI = [
@@ -58,6 +59,7 @@ export class BlockchainMonitor extends EventEmitter {
     this.heartbeatInterval = null;
     this.connectionCheckInterval = null;
     this.lastBlockUpdateTime = Date.now(); // Track last block update
+    this.processedTxTracker = new ProcessedTxTracker();
 
     // Build pool metadata map
     for (const pool of poolMetadata) {
@@ -71,7 +73,7 @@ export class BlockchainMonitor extends EventEmitter {
       const contract = new ethers.Contract(poolAddress, POOL_ABI, this.provider);
       this.contracts.set(poolAddress, contract);
     }
-    
+
     // Initialize ExchangeHelper contract
     if (EXCHANGE_HELPER_ADDRESS && EXCHANGE_HELPER_ADDRESS !== ethers.ZeroAddress) {
       this.exchangeHelper = new ethers.Contract(
@@ -83,6 +85,9 @@ export class BlockchainMonitor extends EventEmitter {
     } else {
       console.warn('No ExchangeHelper address configured');
     }
+
+    // Initialize processed transaction tracker
+    await this.processedTxTracker.initialize();
   }
 
   async start() {
@@ -265,6 +270,12 @@ export class BlockchainMonitor extends EventEmitter {
 
   async processLog(poolAddress, contract, log) {
     try {
+      // Check if transaction was already processed
+      if (this.processedTxTracker.isProcessed(log.transactionHash)) {
+        console.log(`Skipping duplicate transaction: ${log.transactionHash}`);
+        return;
+      }
+
       // Parse the log to determine event type
       const parsedLog = contract.interface.parseLog(log);
       if (!parsedLog) return;
@@ -386,6 +397,9 @@ export class BlockchainMonitor extends EventEmitter {
         console.log(`Swap event - Router: ${args.sender} -> ${args.recipient}, Actual: ${actualSender} -> ${actualRecipient}`);
       }
 
+      // Mark transaction as processed BEFORE emitting to prevent race conditions
+      this.processedTxTracker.markProcessed(log.transactionHash);
+
       this.emit('poolEvent', eventData);
     } catch (error) {
       // Log the error to see what's happening
@@ -411,10 +425,16 @@ export class BlockchainMonitor extends EventEmitter {
 
   async processExchangeHelperLog(log) {
     try {
+      // Check if transaction was already processed
+      if (this.processedTxTracker.isProcessed(log.transactionHash)) {
+        console.log(`Skipping duplicate ExchangeHelper transaction: ${log.transactionHash}`);
+        return;
+      }
+
       // Parse the log to determine event type
       const parsedLog = this.exchangeHelper.interface.parseLog(log);
       if (!parsedLog) return;
-      
+
       // Only process trade events
       const validEvents = ['BoughtTokensETH', 'BoughtTokensWETH', 'SoldTokensETH', 'SoldTokensWETH'];
       if (!validEvents.includes(parsedLog.name)) {
@@ -441,10 +461,13 @@ export class BlockchainMonitor extends EventEmitter {
       };
       
       console.log(`ExchangeHelper ${parsedLog.name} event - User: ${args.who}, Amount: ${args.amount}`);
-      
+
+      // Mark transaction as processed BEFORE emitting to prevent race conditions
+      this.processedTxTracker.markProcessed(log.transactionHash);
+
       // Emit as a special event type for ExchangeHelper trades
       this.emit('exchangeHelperEvent', eventData);
-      
+
     } catch (error) {
       console.error('Error processing ExchangeHelper log:', error.message);
     }
@@ -540,8 +563,10 @@ export class BlockchainMonitor extends EventEmitter {
 
       console.log(`🔍 Starting historical scan from block ${fromBlock} to ${currentBlock} (last ${hoursBack} hours)`);
       console.log(`   Estimated ${estimatedBlocksBack} blocks to scan`);
+      console.log(`   Currently tracking ${this.processedTxTracker.processedTxs.size} processed transactions`);
 
       let totalEventsFound = 0;
+      let duplicatesSkipped = 0;
       const maxBlockRange = 1000; // Scan in chunks of 1000 blocks
 
       for (let startBlock = fromBlock; startBlock <= currentBlock; startBlock += maxBlockRange) {
@@ -564,11 +589,20 @@ export class BlockchainMonitor extends EventEmitter {
 
             if (events.length > 0) {
               console.log(`   Found ${events.length} events for pool ${address} in blocks ${startBlock}-${endBlock}`);
-              totalEventsFound += events.length;
-            }
 
-            for (const log of events) {
-              await this.processLog(address, contract, log);
+              // Count duplicates
+              const beforeCount = this.processedTxTracker.processedTxs.size;
+              for (const log of events) {
+                if (this.processedTxTracker.isProcessed(log.transactionHash)) {
+                  duplicatesSkipped++;
+                }
+                totalEventsFound++;
+              }
+
+              // Process all events (duplicates will be skipped in processLog)
+              for (const log of events) {
+                await this.processLog(address, contract, log);
+              }
             }
 
             await this.sleep(RATE_LIMIT_CONFIG.requestDelay);
@@ -593,11 +627,19 @@ export class BlockchainMonitor extends EventEmitter {
 
             if (exchangeEvents.length > 0) {
               console.log(`   Found ${exchangeEvents.length} ExchangeHelper events in blocks ${startBlock}-${endBlock}`);
-              totalEventsFound += exchangeEvents.length;
-            }
 
-            for (const log of exchangeEvents) {
-              await this.processExchangeHelperLog(log);
+              // Count duplicates
+              for (const log of exchangeEvents) {
+                if (this.processedTxTracker.isProcessed(log.transactionHash)) {
+                  duplicatesSkipped++;
+                }
+                totalEventsFound++;
+              }
+
+              // Process all events (duplicates will be skipped in processExchangeHelperLog)
+              for (const log of exchangeEvents) {
+                await this.processExchangeHelperLog(log);
+              }
             }
 
             await this.sleep(RATE_LIMIT_CONFIG.requestDelay);
@@ -612,8 +654,13 @@ export class BlockchainMonitor extends EventEmitter {
         console.log(`   Progress: ${progress}% (${endBlock - fromBlock} / ${currentBlock - fromBlock} blocks)`);
       }
 
-      console.log(`✅ Historical scan complete! Found ${totalEventsFound} total events`);
-      return totalEventsFound;
+      const newEvents = totalEventsFound - duplicatesSkipped;
+      console.log(`✅ Historical scan complete!`);
+      console.log(`   Total events found: ${totalEventsFound}`);
+      console.log(`   Duplicates skipped: ${duplicatesSkipped}`);
+      console.log(`   New events processed: ${newEvents}`);
+
+      return { totalEventsFound, duplicatesSkipped, newEvents };
 
     } catch (error) {
       console.error('Error during historical block scan:', error);
@@ -621,7 +668,7 @@ export class BlockchainMonitor extends EventEmitter {
     }
   }
 
-  stop() {
+  async stop() {
     if (!this.isRunning) return;
     this.isRunning = false;
 
@@ -650,6 +697,9 @@ export class BlockchainMonitor extends EventEmitter {
         this.exchangeHelper.removeAllListeners();
       }
     }
+
+    // Stop and save processed tx tracker
+    await this.processedTxTracker.stop();
 
     console.log('Stopped monitoring pools');
   }
