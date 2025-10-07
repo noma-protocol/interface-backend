@@ -63,7 +63,7 @@ async function loadVaults(rpcUrl) {
 
     // Map vault info to the format needed by LoanMonitor
     return allVaults.map(vault => ({
-      address: vault.vaultAddress,
+      address: vault.address,
       tokenSymbol: vault.tokenSymbol || 'VAULT',
       tokenName: vault.tokenName || 'Lending Vault'
     }));
