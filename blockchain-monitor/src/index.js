@@ -53,7 +53,8 @@ async function main() {
     const rpcUrl = process.env.RPC_URL;
     const websocketPort = parseInt(process.env.WEBSOCKET_PORT) || 8080;
     const httpPort = parseInt(process.env.HTTP_PORT) || 3004;
-    const historyFilePath = process.env.HISTORY_FILE_PATH || './data/events-history.json';
+    // Use shared data directory (same as pools.json location)
+    const historyFilePath = process.env.HISTORY_FILE_PATH || path.join(__dirname, '..', '..', 'data', 'events-history.json');
     const autoRestartHours = parseFloat(process.env.AUTO_RESTART_HOURS) || 0;
     const historicalScanHours = parseFloat(process.env.HISTORICAL_SCAN_HOURS) || 0;
 
