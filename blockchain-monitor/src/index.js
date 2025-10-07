@@ -49,12 +49,14 @@ async function main() {
     if (DEBUG) {
       console.log('Debug mode enabled');
     }
-    
+
     const rpcUrl = process.env.RPC_URL;
     const websocketPort = parseInt(process.env.WEBSOCKET_PORT) || 8080;
     const httpPort = parseInt(process.env.HTTP_PORT) || 3004;
     const historyFilePath = process.env.HISTORY_FILE_PATH || './data/events-history.json';
-    
+    const autoRestartHours = parseFloat(process.env.AUTO_RESTART_HOURS) || 0;
+    const historicalScanHours = parseFloat(process.env.HISTORICAL_SCAN_HOURS) || 0;
+
     if (!rpcUrl) {
       throw new Error('RPC_URL environment variable is required');
     }
@@ -79,7 +81,7 @@ async function main() {
     await referralStore.initialize();
 
     const referralTracker = new ReferralTracker(
-      blockchainMonitor.provider, 
+      blockchainMonitor.provider,
       referralStore,
       `http://localhost:${httpPort}`
     );
@@ -94,28 +96,28 @@ async function main() {
 
     blockchainMonitor.on('poolEvent', async (eventData) => {
       console.log(`New ${eventData.eventName} event from pool ${eventData.poolAddress}`);
-      
+
       const storedEvent = await eventStorage.addEvent(eventData);
-      
+
       console.log(`Broadcasting ${eventData.eventName} event from pool ${eventData.poolAddress} with id ${storedEvent.id}`);
       wsServer.broadcastEvent(storedEvent);
-      
+
       // Track referral trades (legacy - for pools that don't use ExchangeHelper)
       if (eventData.eventName === 'Swap') {
         await referralTracker.trackSwapEvent(eventData);
       }
     });
-    
+
     // Handle ExchangeHelper events for referral tracking
     blockchainMonitor.on('exchangeHelperEvent', async (eventData) => {
       console.log(`New ExchangeHelper ${eventData.eventName} event - User: ${eventData.args.who}`);
-      
+
       // Store the event
       const storedEvent = await eventStorage.addEvent(eventData);
-      
+
       // Broadcast to WebSocket clients
       wsServer.broadcastEvent(storedEvent);
-      
+
       // Track referral trades through ExchangeHelper
       await referralTracker.trackExchangeHelperEvent(eventData);
     });
@@ -127,7 +129,37 @@ async function main() {
     console.log(`Monitoring ${poolAddresses.length} pools`);
     console.log(`WebSocket server running on port ${websocketPort}`);
     console.log(`HTTP referral API running on port ${httpPort}`);
-    
+
+    // Perform historical block scan if configured
+    if (historicalScanHours > 0) {
+      console.log(`\n📚 Starting historical block scan (${historicalScanHours} hours)...`);
+      try {
+        await blockchainMonitor.scanHistoricalBlocks(historicalScanHours);
+      } catch (error) {
+        console.error('Historical scan failed:', error.message);
+        console.log('Continuing with normal operation...');
+      }
+    } else {
+      console.log('Historical block scanning disabled (set HISTORICAL_SCAN_HOURS to enable)');
+    }
+
+    // Set up automatic restart if configured
+    if (autoRestartHours > 0) {
+      const restartMs = autoRestartHours * 60 * 60 * 1000;
+      console.log(`\n⏰ Auto-restart enabled: Server will restart after ${autoRestartHours} hour(s)`);
+
+      setTimeout(() => {
+        console.log('\n🔄 Auto-restart triggered - Restarting server...');
+        blockchainMonitor.stop();
+        wsServer.stop();
+        httpServer.stop();
+        // Exit with code 0 so process manager (like PM2) can restart it
+        process.exit(0);
+      }, restartMs);
+    } else {
+      console.log('Auto-restart disabled (set AUTO_RESTART_HOURS to enable)');
+    }
+
     // Start cache statistics logging
     cache.startStatsLogging(60000); // Log every minute
     console.log('Cache statistics logging enabled (every 60 seconds)');

@@ -54,6 +54,10 @@ export class BlockchainMonitor extends EventEmitter {
     this.requestQueue = [];
     this.lastRequestTime = 0;
     this.exchangeHelper = null;
+    this.lastEventTime = Date.now(); // Track last event for heartbeat
+    this.heartbeatInterval = null;
+    this.connectionCheckInterval = null;
+    this.lastBlockUpdateTime = Date.now(); // Track last block update
 
     // Build pool metadata map
     for (const pool of poolMetadata) {
@@ -83,28 +87,45 @@ export class BlockchainMonitor extends EventEmitter {
 
   async start() {
     if (this.isRunning) return;
-    
+
     // Check provider connection first
     const isConnected = await checkProviderConnection(this.provider);
     if (!isConnected) {
       throw new Error('Failed to connect to blockchain provider');
     }
-    
+
     this.isRunning = true;
 
     // For WebSocket providers, set up event listeners for real-time updates
-    if (this.provider.websocket) {
+    if (this.provider.isWebSocketProvider) {
       console.log('Setting up WebSocket event listeners...');
       await this.setupWebSocketListeners();
+
+      // Set up reconnection handler
+      this.provider.on('reconnected', async () => {
+        console.log('Provider reconnected, re-establishing event listeners...');
+        await this.setupWebSocketListeners();
+      });
+
+      // Set up disconnection handler
+      this.provider.on('disconnected', () => {
+        console.log('Provider disconnected, event listeners will be re-established on reconnection');
+      });
     }
 
-    // Start polling for events
+    // Start polling for events (works for both HTTP and WebSocket as backup)
     this.lastBlock = await this.provider.getBlockNumber();
     console.log(`Starting from block ${this.lastBlock}`);
-    
+
     this.pollInterval = setInterval(async () => {
       await this.pollEvents();
     }, 20000); // Poll every 20 seconds to reduce API load
+
+    // Start heartbeat monitoring to detect stalled connections
+    this.startHeartbeat();
+
+    // Start periodic connection health checks
+    this.startConnectionHealthCheck();
 
     console.log(`Monitoring ${this.poolAddresses.length} pools for events...`);
   }
@@ -430,31 +451,174 @@ export class BlockchainMonitor extends EventEmitter {
   }
 
   async setupWebSocketListeners() {
+    // Remove all existing listeners first to prevent duplicates
+    for (const contract of this.contracts.values()) {
+      contract.removeAllListeners();
+    }
+    if (this.exchangeHelper) {
+      this.exchangeHelper.removeAllListeners();
+    }
+
     // Set up real-time event listeners for each pool
     for (const [poolAddress, contract] of this.contracts) {
       try {
         // Listen to all events from this pool
         contract.on('*', async (event) => {
           console.log(`Real-time event from pool ${poolAddress}:`, event.eventName);
+          this.lastEventTime = Date.now(); // Update heartbeat
           await this.processLog(poolAddress, contract, event.log);
         });
       } catch (error) {
         console.error(`Error setting up listeners for pool ${poolAddress}:`, error);
       }
     }
-    
+
     // Set up listener for ExchangeHelper events
     if (this.exchangeHelper) {
       this.exchangeHelper.on('*', async (event) => {
         console.log(`Real-time ExchangeHelper event:`, event.eventName);
+        this.lastEventTime = Date.now(); // Update heartbeat
         await this.processExchangeHelperLog(event.log);
       });
     }
-    
+
     // Listen for new blocks (useful for updating lastBlock)
+    this.provider.removeAllListeners('block'); // Remove old listener
     this.provider.on('block', (blockNumber) => {
       this.lastBlock = blockNumber;
+      this.lastBlockUpdateTime = Date.now(); // Update block heartbeat
     });
+  }
+
+  startHeartbeat() {
+    // Check every 2 minutes if we're receiving events or block updates
+    this.heartbeatInterval = setInterval(() => {
+      const now = Date.now();
+      const timeSinceLastBlock = now - this.lastBlockUpdateTime;
+
+      // If no block updates for 5 minutes, something is wrong
+      if (timeSinceLastBlock > 5 * 60 * 1000) {
+        console.error(`⚠️ HEARTBEAT FAILED: No block updates for ${Math.round(timeSinceLastBlock / 1000)}s`);
+        console.error('Connection appears stalled. Consider restarting the monitor.');
+        this.emit('connectionStalled');
+      } else {
+        console.log(`✓ Heartbeat OK - Last block update: ${Math.round(timeSinceLastBlock / 1000)}s ago`);
+      }
+    }, 2 * 60 * 1000); // Check every 2 minutes
+  }
+
+  startConnectionHealthCheck() {
+    // Check provider connection health every 5 minutes
+    this.connectionCheckInterval = setInterval(async () => {
+      try {
+        const isConnected = await checkProviderConnection(this.provider);
+        if (!isConnected) {
+          console.error('⚠️ CONNECTION HEALTH CHECK FAILED');
+          this.emit('connectionFailed');
+        } else {
+          console.log('✓ Connection health check passed');
+        }
+      } catch (error) {
+        console.error('Connection health check error:', error.message);
+      }
+    }, 5 * 60 * 1000); // Check every 5 minutes
+  }
+
+  async scanHistoricalBlocks(hoursBack = 24) {
+    try {
+      const currentBlock = await this.provider.getBlockNumber();
+      const currentBlockData = await this.provider.getBlock(currentBlock);
+      const currentTimestamp = currentBlockData.timestamp;
+
+      // Calculate block range (approximate)
+      const secondsBack = hoursBack * 60 * 60;
+      const targetTimestamp = currentTimestamp - secondsBack;
+
+      // Estimate blocks back (assuming ~2 second block time for most EVM chains)
+      const estimatedBlocksBack = Math.floor(secondsBack / 2);
+      const fromBlock = Math.max(0, currentBlock - estimatedBlocksBack);
+
+      console.log(`🔍 Starting historical scan from block ${fromBlock} to ${currentBlock} (last ${hoursBack} hours)`);
+      console.log(`   Estimated ${estimatedBlocksBack} blocks to scan`);
+
+      let totalEventsFound = 0;
+      const maxBlockRange = 1000; // Scan in chunks of 1000 blocks
+
+      for (let startBlock = fromBlock; startBlock <= currentBlock; startBlock += maxBlockRange) {
+        const endBlock = Math.min(startBlock + maxBlockRange - 1, currentBlock);
+
+        console.log(`   Scanning blocks ${startBlock} to ${endBlock}...`);
+
+        // Query all pools
+        for (const [address, contract] of this.contracts) {
+          try {
+            const filter = {
+              address: address,
+              fromBlock: startBlock,
+              toBlock: endBlock
+            };
+
+            const events = await this.rateLimitedRequest(async () => {
+              return await this.provider.getLogs(filter);
+            });
+
+            if (events.length > 0) {
+              console.log(`   Found ${events.length} events for pool ${address} in blocks ${startBlock}-${endBlock}`);
+              totalEventsFound += events.length;
+            }
+
+            for (const log of events) {
+              await this.processLog(address, contract, log);
+            }
+
+            await this.sleep(RATE_LIMIT_CONFIG.requestDelay);
+
+          } catch (error) {
+            console.error(`Error scanning pool ${address}:`, error.message);
+          }
+        }
+
+        // Scan ExchangeHelper events
+        if (this.exchangeHelper) {
+          try {
+            const exchangeHelperFilter = {
+              address: EXCHANGE_HELPER_ADDRESS,
+              fromBlock: startBlock,
+              toBlock: endBlock
+            };
+
+            const exchangeEvents = await this.rateLimitedRequest(async () => {
+              return await this.provider.getLogs(exchangeHelperFilter);
+            });
+
+            if (exchangeEvents.length > 0) {
+              console.log(`   Found ${exchangeEvents.length} ExchangeHelper events in blocks ${startBlock}-${endBlock}`);
+              totalEventsFound += exchangeEvents.length;
+            }
+
+            for (const log of exchangeEvents) {
+              await this.processExchangeHelperLog(log);
+            }
+
+            await this.sleep(RATE_LIMIT_CONFIG.requestDelay);
+
+          } catch (error) {
+            console.error(`Error scanning ExchangeHelper:`, error.message);
+          }
+        }
+
+        // Progress update
+        const progress = ((endBlock - fromBlock) / (currentBlock - fromBlock) * 100).toFixed(1);
+        console.log(`   Progress: ${progress}% (${endBlock - fromBlock} / ${currentBlock - fromBlock} blocks)`);
+      }
+
+      console.log(`✅ Historical scan complete! Found ${totalEventsFound} total events`);
+      return totalEventsFound;
+
+    } catch (error) {
+      console.error('Error during historical block scan:', error);
+      throw error;
+    }
   }
 
   stop() {
@@ -465,9 +629,19 @@ export class BlockchainMonitor extends EventEmitter {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
     }
-    
+
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+
+    if (this.connectionCheckInterval) {
+      clearInterval(this.connectionCheckInterval);
+      this.connectionCheckInterval = null;
+    }
+
     // Remove WebSocket listeners if using WebSocket provider
-    if (this.provider.websocket) {
+    if (this.provider.isWebSocketProvider) {
       this.provider.removeAllListeners();
       for (const contract of this.contracts.values()) {
         contract.removeAllListeners();

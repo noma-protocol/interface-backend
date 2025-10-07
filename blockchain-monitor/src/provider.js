@@ -33,32 +33,38 @@ export class ResilientProvider extends ethers.JsonRpcProvider {
 
 export function createProvider(url, network) {
   const isWebSocket = url.startsWith('ws://') || url.startsWith('wss://');
-  
+
   if (isWebSocket) {
     console.log('Creating WebSocket provider for:', url);
     const provider = new ethers.WebSocketProvider(url, network);
-    
+
+    // Mark as WebSocket provider for detection
+    provider.isWebSocketProvider = true;
+
     // Set up event listeners
     provider.on('error', (error) => {
       console.error('WebSocket provider error:', error);
     });
-    
+
     // Handle reconnection
     let reconnectAttempts = 0;
     const maxReconnectAttempts = 10;
     const reconnectDelay = 5000; // 5 seconds
-    
+
     // WebSocketProvider automatically handles reconnection in ethers v6
     // We just need to listen for debug events to track the status
     provider.on('debug', (info) => {
       if (info.action === 'webSocketOpen') {
         console.log('WebSocket connection established');
         reconnectAttempts = 0;
+        // Emit custom event for listeners to re-establish
+        provider.emit('reconnected');
       } else if (info.action === 'webSocketClose') {
         console.log('WebSocket connection closed');
+        provider.emit('disconnected');
       }
     });
-    
+
     return provider;
   } else {
     console.log('Creating HTTP provider for:', url);
