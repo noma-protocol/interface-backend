@@ -281,6 +281,11 @@ export class BlockchainMonitor extends EventEmitter {
       const parsedLog = contract.interface.parseLog(log);
       if (!parsedLog) return;
       
+      // Only process Swap events from pools
+      if (parsedLog.name !== 'Swap') {
+        return;
+      }
+      
       // Convert args to plain object and handle BigInt values
       let args = {};
       
@@ -486,7 +491,7 @@ export class BlockchainMonitor extends EventEmitter {
     // Set up real-time event listeners for each pool
     for (const [poolAddress, contract] of this.contracts) {
       try {
-        // Listen to all events from this pool
+        // Listen to all events but filter to Swap only in processLog
         contract.on('*', async (event) => {
           console.log(`Real-time event from pool ${poolAddress}:`, event.eventName);
           this.lastEventTime = Date.now(); // Update heartbeat
