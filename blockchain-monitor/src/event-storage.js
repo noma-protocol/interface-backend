@@ -65,15 +65,24 @@ export class EventStorage {
       throw new Error('EventStorage not initialized');
     }
 
+    const eventId = this.generateEventId(event);
+
+    // Check if event already exists
+    const existingEvent = this.events.find(e => e.id === eventId);
+    if (existingEvent) {
+      console.log(`Event ${eventId} already exists in storage, skipping`);
+      return existingEvent;
+    }
+
     const eventWithId = {
       ...event,
-      id: this.generateEventId(event),
+      id: eventId,
       storedAt: Date.now()
     };
 
     this.events.push(eventWithId);
     await this.save();
-    
+
     return eventWithId;
   }
 
@@ -211,12 +220,38 @@ export class EventStorage {
   async clearOldEvents(daysToKeep = 30) {
     const cutoffTime = Date.now() - (daysToKeep * 24 * 60 * 60 * 1000);
     const originalCount = this.events.length;
-    
+
     this.events = this.events.filter(event => event.timestamp >= cutoffTime);
-    
+
     if (this.events.length < originalCount) {
       await this.save();
       console.log(`Cleared ${originalCount - this.events.length} old events`);
     }
+  }
+
+  async removeDuplicates() {
+    const originalCount = this.events.length;
+    const seenIds = new Set();
+    const uniqueEvents = [];
+
+    for (const event of this.events) {
+      const id = event.id || this.generateEventId(event);
+      if (!seenIds.has(id)) {
+        seenIds.add(id);
+        uniqueEvents.push({ ...event, id });
+      } else {
+        console.log(`Removing duplicate event: ${id}`);
+      }
+    }
+
+    this.events = uniqueEvents;
+    const removedCount = originalCount - this.events.length;
+
+    if (removedCount > 0) {
+      await this.save();
+      console.log(`Removed ${removedCount} duplicate events from storage`);
+    }
+
+    return removedCount;
   }
 }

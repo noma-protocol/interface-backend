@@ -60,6 +60,7 @@ export class BlockchainMonitor extends EventEmitter {
     this.connectionCheckInterval = null;
     this.lastBlockUpdateTime = Date.now(); // Track last block update
     this.processedTxTracker = new ProcessedTxTracker();
+    this.isRecovering = false; // Track recovery state
 
     // Build pool metadata map
     for (const pool of poolMetadata) {
@@ -515,15 +516,18 @@ export class BlockchainMonitor extends EventEmitter {
 
   startHeartbeat() {
     // Check every 2 minutes if we're receiving events or block updates
-    this.heartbeatInterval = setInterval(() => {
+    this.heartbeatInterval = setInterval(async () => {
       const now = Date.now();
       const timeSinceLastBlock = now - this.lastBlockUpdateTime;
 
       // If no block updates for 5 minutes, something is wrong
       if (timeSinceLastBlock > 5 * 60 * 1000) {
         console.error(`⚠️ HEARTBEAT FAILED: No block updates for ${Math.round(timeSinceLastBlock / 1000)}s`);
-        console.error('Connection appears stalled. Consider restarting the monitor.');
+        console.error('Connection appears stalled. Attempting automatic recovery...');
         this.emit('connectionStalled');
+
+        // Attempt automatic recovery
+        await this.recoverConnection();
       } else {
         console.log(`✓ Heartbeat OK - Last block update: ${Math.round(timeSinceLastBlock / 1000)}s ago`);
       }
@@ -537,14 +541,80 @@ export class BlockchainMonitor extends EventEmitter {
         const isConnected = await checkProviderConnection(this.provider);
         if (!isConnected) {
           console.error('⚠️ CONNECTION HEALTH CHECK FAILED');
+          console.error('Attempting automatic recovery...');
           this.emit('connectionFailed');
+
+          // Attempt automatic recovery
+          await this.recoverConnection();
         } else {
           console.log('✓ Connection health check passed');
         }
       } catch (error) {
         console.error('Connection health check error:', error.message);
+        // Attempt recovery on health check errors too
+        await this.recoverConnection();
       }
     }, 5 * 60 * 1000); // Check every 5 minutes
+  }
+
+  async recoverConnection() {
+    // Prevent multiple simultaneous recovery attempts
+    if (this.isRecovering) {
+      console.log('Recovery already in progress, skipping...');
+      return;
+    }
+
+    this.isRecovering = true;
+    console.log('🔄 Starting connection recovery...');
+
+    try {
+      // Step 1: Remove all existing listeners to prevent duplicates
+      console.log('   1. Removing existing event listeners...');
+      if (this.provider.isWebSocketProvider) {
+        this.provider.removeAllListeners();
+        for (const contract of this.contracts.values()) {
+          contract.removeAllListeners();
+        }
+        if (this.exchangeHelper) {
+          this.exchangeHelper.removeAllListeners();
+        }
+      }
+
+      // Step 2: Try to get current block to test connection
+      console.log('   2. Testing provider connection...');
+      let connectionOk = false;
+      try {
+        await this.provider.getBlockNumber();
+        connectionOk = true;
+        console.log('   ✓ Provider connection is working');
+      } catch (error) {
+        console.error('   ✗ Provider connection failed:', error.message);
+      }
+
+      // Step 3: Re-establish event listeners
+      if (connectionOk && this.provider.isWebSocketProvider) {
+        console.log('   3. Re-establishing WebSocket event listeners...');
+        await this.setupWebSocketListeners();
+      }
+
+      // Step 4: Reset heartbeat timestamp
+      this.lastBlockUpdateTime = Date.now();
+      console.log('   4. Reset heartbeat timestamp');
+
+      // Step 5: Verify recovery
+      console.log('   5. Verifying recovery...');
+      await this.sleep(5000); // Wait 5 seconds
+      const currentBlock = await this.provider.getBlockNumber();
+      console.log(`   ✓ Recovery successful! Current block: ${currentBlock}`);
+
+      this.emit('connectionRecovered');
+
+    } catch (error) {
+      console.error('❌ Connection recovery failed:', error.message);
+      console.error('The monitor will continue attempting recovery on next heartbeat check.');
+    } finally {
+      this.isRecovering = false;
+    }
   }
 
   async scanHistoricalBlocks(hoursBack = 24) {

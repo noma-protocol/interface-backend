@@ -71,6 +71,10 @@ async function main() {
     const eventStorage = new EventStorage(historyFilePath, pools);
     await eventStorage.initialize();
 
+    // Clean up any existing duplicates
+    console.log('Checking for duplicate events in storage...');
+    await eventStorage.removeDuplicates();
+
     const authManager = new AuthManager();
 
     const blockchainMonitor = new BlockchainMonitor(rpcUrl, poolAddresses, pools);
@@ -129,6 +133,11 @@ async function main() {
     console.log(`Monitoring ${poolAddresses.length} pools`);
     console.log(`WebSocket server running on port ${websocketPort}`);
     console.log(`HTTP referral API running on port ${httpPort}`);
+
+    // Listen for connection recovery events
+    blockchainMonitor.on('connectionRecovered', () => {
+      console.log('✅ Connection recovered successfully!');
+    });
 
     // Perform historical block scan if configured
     if (historicalScanHours > 0) {
