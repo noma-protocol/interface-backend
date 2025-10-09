@@ -325,16 +325,18 @@ export class WSServer extends EventEmitter {
         }
 
         // Notify about peer connection cleanup - tell all clients to clean up connections to this peer
-        const peerDisconnectNotification = {
-          type: 'peer-disconnected',
-          peerId: clientId,
-          peerAddress: clientInfo.address,
-          timestamp: Date.now()
-        };
+        if (clientInfo) {
+          const peerDisconnectNotification = {
+            type: 'peer-disconnected',
+            peerId: clientId,
+            peerAddress: clientInfo.address,
+            timestamp: Date.now()
+          };
 
-        for (const [otherId, otherClient] of this.clients) {
-          if (otherId !== clientId && otherClient.ws.readyState === 1) {
-            otherClient.ws.send(JSON.stringify(peerDisconnectNotification));
+          for (const [otherId, otherClient] of this.clients) {
+            if (otherId !== clientId && otherClient.ws.readyState === 1) {
+              otherClient.ws.send(JSON.stringify(peerDisconnectNotification));
+            }
           }
         }
 
